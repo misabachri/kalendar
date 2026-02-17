@@ -95,11 +95,11 @@ function forcedWantDoctorForDay(
   day: number,
   wantedDoctorsByDay: WantedDoctorsByDay,
   counts: Record<number, number>,
-  targets: Record<number, number>,
+  caps: Record<number, number>,
 ): number | null {
   const wantedIds = wantedDoctorsByDay[day] ?? [];
   for (const doctorId of wantedIds) {
-    if ((counts[doctorId] ?? 0) < (targets[doctorId] ?? 0)) {
+    if ((counts[doctorId] ?? 0) < (caps[doctorId] ?? 0)) {
       return doctorId;
     }
   }
@@ -141,7 +141,7 @@ function isHardAllowed(
   wantedDoctorsByDay: WantedDoctorsByDay,
   input: ScheduleInput,
 ): boolean {
-  const forcedWantDoctorId = forcedWantDoctorForDay(day, wantedDoctorsByDay, state.counts, targets);
+  const forcedWantDoctorId = forcedWantDoctorForDay(day, wantedDoctorsByDay, state.counts, caps);
   if (forcedWantDoctorId !== null && forcedWantDoctorId !== doctor.id) {
     return false;
   }
@@ -306,7 +306,7 @@ function weekendBlockKey(year: number, month: number, day: number): string | nul
 function validateLocks(
   input: ScheduleInput,
   caps: Record<number, number>,
-  targets: Record<number, number>,
+  _targets: Record<number, number>,
   wantedDoctorsByDay: WantedDoctorsByDay,
 ): string[] {
   const issues: string[] = [];
@@ -324,7 +324,7 @@ function validateLocks(
       continue;
     }
 
-    const forcedWantDoctorId = forcedWantDoctorForDay(day, wantedDoctorsByDay, lockedCountsBeforeDay, targets);
+    const forcedWantDoctorId = forcedWantDoctorForDay(day, wantedDoctorsByDay, lockedCountsBeforeDay, caps);
     if (forcedWantDoctorId !== null && forcedWantDoctorId !== docId) {
       const forcedWantDoctor = input.doctors.find((d) => d.id === forcedWantDoctorId);
       issues.push(
