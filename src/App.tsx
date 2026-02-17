@@ -13,7 +13,7 @@ import {
   type PersistedState,
 } from './storage';
 import type { Doctor, PreferenceValue, ScheduleResult } from './types';
-import { daysInMonth, weekday, weekdayMondayIndex } from './utils/date';
+import { daysInMonth, isWeekendServiceDay, weekday, weekdayMondayIndex } from './utils/date';
 
 const PREF_LABELS: Record<PreferenceValue, string> = {
   0: 'Bez omezení',
@@ -48,7 +48,7 @@ function roleLabel(role: Doctor['role']): string {
 }
 
 function isCertifiedDoctor(doctor: Doctor): boolean {
-  return doctor.order <= 5;
+  return doctor.order <= 5 || doctor.id === 8;
 }
 
 function isFixedNamedDoctor(doctor: Doctor): boolean {
@@ -113,6 +113,28 @@ function monthCells(year: number, month: number, dayCount: number): CalendarCell
   return cells;
 }
 
+function buildStatsFromAssignments(
+  assignments: Record<number, number>,
+  doctors: Doctor[],
+  year: number,
+  month: number,
+): { totalByDoctor: Record<number, number>; weekendByDoctor: Record<number, number> } {
+  const totalByDoctor: Record<number, number> = {};
+  const weekendByDoctor: Record<number, number> = {};
+  for (const doctor of doctors) {
+    totalByDoctor[doctor.id] = 0;
+    weekendByDoctor[doctor.id] = 0;
+  }
+  for (const [dayRaw, doctorId] of Object.entries(assignments)) {
+    const day = Number(dayRaw);
+    totalByDoctor[doctorId] = (totalByDoctor[doctorId] ?? 0) + 1;
+    if (isWeekendServiceDay(year, month, day)) {
+      weekendByDoctor[doctorId] = (weekendByDoctor[doctorId] ?? 0) + 1;
+    }
+  }
+  return { totalByDoctor, weekendByDoctor };
+}
+
 interface MonthlyRequestPlan {
   year: number;
   month: number;
@@ -154,12 +176,20 @@ export default function App() {
         };
       })(),
   );
-  const [result, setResult] = useState<ScheduleResult | null>(null);
+  const [result, setResult] = useState<ScheduleResult | null>(initial.lastResult ?? null);
   const [activeDoctorId, setActiveDoctorId] = useState(initial.doctors[0]?.id ?? 1);
   const [backupNotice, setBackupNotice] = useState<string | null>(null);
   const [debateSelectionByDay, setDebateSelectionByDay] = useState<Record<number, number>>({});
   const [showOnlyProblemDays, setShowOnlyProblemDays] = useState(false);
   const [resultSelectionByDay, setResultSelectionByDay] = useState<Record<number, number>>({});
+  const [swapDayA, setSwapDayA] = useState<number | ''>('');
+  const [swapDayB, setSwapDayB] = useState<number | ''>('');
+  const [lastSwapSnapshot, setLastSwapSnapshot] = useState<{
+    assignments: Record<number, number>;
+    locks: Record<number, number | null>;
+    dayA: number;
+    dayB: number;
+  } | null>(null);
   const [showDoctorsSection, setShowDoctorsSection] = useState(false);
   const [savedVersions, setSavedVersions] = useState<SavedScheduleVersion[]>(() => loadSavedVersions());
   const [generationNotice, setGenerationNotice] = useState<string | null>(null);
@@ -286,10 +316,11 @@ export default function App() {
       previousMonthLastTwo: primaryPlan.previousMonthLastTwo,
       seed: primaryPlan.seed,
       finalizedAt: primaryPlan.finalizedAt,
+      lastResult: result,
       activePlanSlot,
       secondaryPlan: secondaryPlan,
     });
-  }, [doctors, maxShiftsByDoctor, targetShiftsByDoctor, primaryPlan, secondaryPlan, activePlanSlot]);
+  }, [doctors, maxShiftsByDoctor, targetShiftsByDoctor, primaryPlan, secondaryPlan, activePlanSlot, result]);
 
   const updateDoctorName = (id: number, name: string) => {
     setDoctors((prev) => prev.map((d) => (d.id === id ? { ...d, name } : d)));
@@ -308,19 +339,12 @@ export default function App() {
   const updateTargetShifts = (doctorId: number, value: string) => {
     const parsed = Number(value);
     const safe = Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
-    const doctor = doctors.find((d) => d.id === doctorId);
-    const maxForDoctor =
-      doctor?.role === 'primar'
-        ? 1
-        : doctor?.role === 'zastupce'
-          ? 2
-          : Math.max(0, Math.floor(maxShiftsByDoctor[doctorId] ?? 5));
+    const maxForDoctor = Math.max(0, Math.floor(maxShiftsByDoctor[doctorId] ?? 5));
     setTargetShiftsByDoctor((prev) => ({ ...prev, [doctorId]: Math.min(safe, maxForDoctor) }));
   };
 
   const adjustMaxShifts = (doctorId: number, delta: number) => {
-    const doctor = doctors.find((d) => d.id === doctorId);
-    const current = doctor?.role === 'primar' ? 1 : doctor?.role === 'zastupce' ? 2 : (maxShiftsByDoctor[doctorId] ?? 5);
+    const current = maxShiftsByDoctor[doctorId] ?? 5;
     const next = Math.max(0, current + delta);
     updateMaxShifts(doctorId, String(next));
   };
@@ -512,33 +536,6 @@ export default function App() {
     };
     const idealNames = idealReplacementNames();
 
-    if (selectedDoctor && (selectedDoctor.role === 'primar' || selectedDoctor.role === 'zastupce')) {
-      const maxAllowed = maxShiftsByDoctor[selectedDoctorId] ?? (selectedDoctor.role === 'primar' ? 1 : 2);
-      let projectedCount = 0;
-      if (result && result.ok) {
-        for (let d = 1; d <= dayCount; d += 1) {
-          const currentDoctorId = d === day ? selectedDoctorId : result.assignments[d];
-          if (currentDoctorId === selectedDoctorId) {
-            projectedCount += 1;
-          }
-        }
-      } else {
-        projectedCount = Object.entries(locks).filter(([dayStr, doctorId]) => {
-          if (Number(dayStr) === day) {
-            return selectedDoctorId === doctorId;
-          }
-          return doctorId === selectedDoctorId;
-        }).length;
-        if (locks[day] !== selectedDoctorId) {
-          projectedCount += 1;
-        }
-      }
-      if (projectedCount > maxAllowed) {
-        window.alert(`${selectedDoctorName} má maximum ${maxAllowed} služeb a tuto hodnotu nelze překročit.`);
-        return false;
-      }
-    }
-
     const selectedPreference = preferences[selectedDoctorId]?.[day] ?? 0;
     if (selectedPreference === 1) {
       const suggestionText =
@@ -601,12 +598,100 @@ export default function App() {
       }
       return;
     }
-    const nextLocks = {
+
+    const nextLocks: Record<number, number | null> = {
       ...locks,
       [day]: selectedDoctorId,
     };
+
+    let removedDay: number | null = null;
+    if (result && result.ok) {
+      const maxAllowed = Math.max(0, Math.floor(maxShiftsByDoctor[selectedDoctorId] ?? 5));
+      const assignedDays = Array.from({ length: dayCount }, (_, idx) => idx + 1).filter(
+        (d) => result.assignments[d] === selectedDoctorId,
+      );
+      const projectedCount = assignedDays.length + (result.assignments[day] === selectedDoctorId ? 0 : 1);
+      if (projectedCount > maxAllowed) {
+        const removableDay = assignedDays.find((d) => d !== day) ?? null;
+        if (removableDay !== null) {
+          removedDay = removableDay;
+          if (nextLocks[removableDay] === selectedDoctorId) {
+            delete nextLocks[removableDay];
+          }
+        }
+      }
+    }
+
+    const canSkipRecalc =
+      result &&
+      result.ok &&
+      removedDay === null &&
+      result.assignments[day] === selectedDoctorId &&
+      locks[day] !== selectedDoctorId;
+
     setLocks(nextLocks);
+    if (canSkipRecalc) {
+      setBackupNotice(`Den ${day} byl zamčen bez přepočtu.`);
+      return;
+    }
+
+    if (removedDay !== null) {
+      setBackupNotice(`Pro ${doctors.find((d) => d.id === selectedDoctorId)?.name ?? 'lékaře'} byl uvolněn den ${removedDay}, aby nepřekročil maximum.`);
+    }
     runGenerationWithLocks(nextLocks);
+  };
+
+  const applySwapWithoutRecalc = () => {
+    if (!result || !result.ok || swapDayA === '' || swapDayB === '' || swapDayA === swapDayB) {
+      return;
+    }
+
+    const dayA = swapDayA;
+    const dayB = swapDayB;
+    const doctorA = result.assignments[dayA];
+    const doctorB = result.assignments[dayB];
+    if (!doctorA || !doctorB) {
+      return;
+    }
+
+    const nextAssignments: Record<number, number> = { ...result.assignments, [dayA]: doctorB, [dayB]: doctorA };
+    const nextLocks: Record<number, number | null> = { ...locks, [dayA]: doctorB, [dayB]: doctorA };
+    const nextStats = buildStatsFromAssignments(nextAssignments, doctors, year, month);
+
+    setLastSwapSnapshot({
+      assignments: { ...result.assignments },
+      locks: { ...locks },
+      dayA,
+      dayB,
+    });
+    setLocks(nextLocks);
+    setResult({
+      ...result,
+      assignments: nextAssignments,
+      stats: nextStats,
+    });
+    setResultSelectionByDay((prev) => ({ ...prev, [dayA]: doctorB, [dayB]: doctorA }));
+    setBackupNotice(`Prohozeny dny ${dayA} a ${dayB} bez přepočtu zbytku kalendáře.`);
+  };
+
+  const undoLastSwap = () => {
+    if (!result || !result.ok || !lastSwapSnapshot) {
+      return;
+    }
+    const restoredStats = buildStatsFromAssignments(lastSwapSnapshot.assignments, doctors, year, month);
+    setLocks(lastSwapSnapshot.locks);
+    setResult({
+      ...result,
+      assignments: lastSwapSnapshot.assignments,
+      stats: restoredStats,
+    });
+    setResultSelectionByDay((prev) => ({
+      ...prev,
+      [lastSwapSnapshot.dayA]: lastSwapSnapshot.assignments[lastSwapSnapshot.dayA],
+      [lastSwapSnapshot.dayB]: lastSwapSnapshot.assignments[lastSwapSnapshot.dayB],
+    }));
+    setBackupNotice(`Vráceno poslední prohození dnů ${lastSwapSnapshot.dayA} a ${lastSwapSnapshot.dayB}.`);
+    setLastSwapSnapshot(null);
   };
 
   const weekdayShortForDay = (day: number): string => WEEKDAY_SHORT[weekdayMondayIndex(year, month, day)];
@@ -684,6 +769,7 @@ export default function App() {
     previousMonthLastTwo: primaryPlan.previousMonthLastTwo,
     seed: primaryPlan.seed,
     finalizedAt: primaryPlan.finalizedAt,
+    lastResult: result,
     activePlanSlot,
     secondaryPlan: secondaryPlan,
   });
@@ -718,9 +804,9 @@ export default function App() {
     setMaxShiftsByDoctor(next.maxShiftsByDoctor);
     setTargetShiftsByDoctor(next.targetShiftsByDoctor);
     setActiveDoctorId(next.doctors[0]?.id ?? 1);
-    setResult(null);
+    setResult(next.lastResult ?? null);
     setShowOnlyProblemDays(false);
-    saveState(next);
+    saveState({ ...next, lastResult: next.lastResult ?? null });
   };
 
   const loadSavedVersion = (version: SavedScheduleVersion) => {
@@ -756,7 +842,7 @@ export default function App() {
     setActiveDoctorId(next.doctors[0]?.id ?? 1);
     setResult(version.result);
     setShowOnlyProblemDays(false);
-    saveState(next);
+    saveState({ ...next, lastResult: version.result });
     setBackupNotice(`Načtena uložená verze: ${version.title}`);
   };
 
@@ -816,7 +902,7 @@ export default function App() {
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 16px; color: #0f172a; }
     h1 { margin: 0 0 12px; font-size: 20px; }
-    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    table { width: 100%; border-collapse: collapse; font-size: 16px; }
     th, td { border: 1px solid #cbd5e1; padding: 8px; text-align: left; }
     th { background: #f1f5f9; }
     @media print { body { margin: 10mm; } }
@@ -889,6 +975,9 @@ export default function App() {
   useEffect(() => {
     if (!result || !result.ok) {
       setResultSelectionByDay({});
+      setSwapDayA('');
+      setSwapDayB('');
+      setLastSwapSnapshot(null);
       return;
     }
     const next: Record<number, number> = {};
@@ -896,6 +985,7 @@ export default function App() {
       next[day] = result.assignments[day];
     }
     setResultSelectionByDay(next);
+    setLastSwapSnapshot(null);
   }, [result, dayCount]);
 
   const applyDebateChoiceAndRecalculate = (day: number) => {
@@ -1116,8 +1206,7 @@ export default function App() {
                           <button
                             type="button"
                             onClick={() => adjustMaxShifts(doctor.id, -1)}
-                            disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
-                            className="rounded border border-slate-300 px-2 py-1 leading-none disabled:bg-slate-100 disabled:text-slate-500"
+                            className="rounded border border-slate-300 px-2 py-1 leading-none"
                             aria-label={`Snížit max služeb pro ${doctor.name}`}
                           >
                             -
@@ -1125,16 +1214,14 @@ export default function App() {
                           <input
                             type="number"
                             min={0}
-                            value={doctor.role === 'primar' ? 1 : doctor.role === 'zastupce' ? 2 : (maxShiftsByDoctor[doctor.id] ?? 5)}
+                            value={maxShiftsByDoctor[doctor.id] ?? 5}
                             onChange={(e) => updateMaxShifts(doctor.id, e.target.value)}
-                            disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
-                            className="w-14 rounded border border-slate-300 px-1 py-1 text-center text-xs disabled:bg-slate-100 disabled:text-slate-500"
+                            className="w-14 rounded border border-slate-300 px-1 py-1 text-center text-xs"
                           />
                           <button
                             type="button"
                             onClick={() => adjustMaxShifts(doctor.id, 1)}
-                            disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
-                            className="rounded border border-slate-300 px-2 py-1 leading-none disabled:bg-slate-100 disabled:text-slate-500"
+                            className="rounded border border-slate-300 px-2 py-1 leading-none"
                             aria-label={`Zvýšit max služeb pro ${doctor.name}`}
                           >
                             +
@@ -1500,6 +1587,13 @@ export default function App() {
                   Export CSV
                 </button>
               )}
+              <button
+                type="button"
+                onClick={unlockAllDays}
+                className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+              >
+                Odemknout všechny dny
+              </button>
               {isExpertMode && (
                 <button
                   type="button"
@@ -1509,15 +1603,6 @@ export default function App() {
                   Zamknout vše z rozpisu
                 </button>
               )}
-              {isExpertMode && (
-                <button
-                  type="button"
-                  onClick={unlockAllDays}
-                  className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
-                >
-                  Odemknout vše
-                </button>
-              )}
               {activePlan.finalizedAt && (
                 <span className="text-sm font-medium text-emerald-700">
                   Finální potvrzení: {new Date(activePlan.finalizedAt).toLocaleString('cs-CZ')}
@@ -1525,6 +1610,57 @@ export default function App() {
               )}
             </div>
             {generationNotice && <p className="no-print mb-3 text-sm text-slate-700">{generationNotice}</p>}
+            <div className="no-print mb-3 rounded border border-slate-200 bg-slate-50 p-3">
+              <p className="mb-2 text-sm font-semibold text-slate-800">Prohodit 2 dny bez přepočtu</p>
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="text-xs text-slate-700">
+                  Den A
+                  <select
+                    value={swapDayA}
+                    onChange={(e) => setSwapDayA(e.target.value ? Number(e.target.value) : '')}
+                    className="ml-2 rounded border border-slate-300 px-2 py-1 text-sm"
+                  >
+                    <option value="">Vyber den</option>
+                    {Array.from({ length: dayCount }, (_, idx) => idx + 1).map((day) => (
+                      <option key={`swap-a-${day}`} value={day}>
+                        {day}. {doctors.find((d) => d.id === result.assignments[day])?.name ?? '—'}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-xs text-slate-700">
+                  Den B
+                  <select
+                    value={swapDayB}
+                    onChange={(e) => setSwapDayB(e.target.value ? Number(e.target.value) : '')}
+                    className="ml-2 rounded border border-slate-300 px-2 py-1 text-sm"
+                  >
+                    <option value="">Vyber den</option>
+                    {Array.from({ length: dayCount }, (_, idx) => idx + 1).map((day) => (
+                      <option key={`swap-b-${day}`} value={day}>
+                        {day}. {doctors.find((d) => d.id === result.assignments[day])?.name ?? '—'}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  onClick={applySwapWithoutRecalc}
+                  disabled={swapDayA === '' || swapDayB === '' || swapDayA === swapDayB}
+                  className="rounded bg-slate-900 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+                >
+                  Prohodit bez přepočtu
+                </button>
+                <button
+                  type="button"
+                  onClick={undoLastSwap}
+                  disabled={!lastSwapSnapshot}
+                  className="rounded border border-slate-300 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
+                >
+                  Zpět poslední prohození
+                </button>
+              </div>
+            </div>
             <div className="mb-4">
               <div className="rounded border border-rose-300 bg-rose-50 p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1553,7 +1689,8 @@ export default function App() {
             </div>
             <div className="space-y-2 sm:hidden">
               {mobileResultDays.map((day) => {
-                const assignedDoctor = doctors.find((d) => d.id === result.assignments[day]);
+                const assignedDoctorId = resultSelectionByDay[day] ?? result.assignments[day];
+                const assignedDoctor = doctors.find((d) => d.id === assignedDoctorId);
                 const isCertified = assignedDoctor ? isCertifiedDoctor(assignedDoctor) : false;
                 const isLocked = locks[day] != null;
                 const isSoftLock = isSoftWantLockedDay(day);
@@ -1581,18 +1718,10 @@ export default function App() {
                         </div>
                       )}
                     </div>
-                    <div className="mt-1 flex items-center gap-2">
-                      <span className="text-base font-medium">{assignedDoctor?.name ?? '—'}</span>
-                      {isCertified && (
-                        <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-emerald-800">
-                          Atestovaný
-                        </span>
-                      )}
-                    </div>
                     <div className="no-print mt-2">
                       <div className={`flex flex-col gap-1 ${isLocked ? 'opacity-60' : ''}`}>
                         <select
-                          value={resultSelectionByDay[day] ?? result.assignments[day]}
+                          value={assignedDoctorId}
                           onChange={(e) =>
                             setResultSelectionByDay((prev) => ({
                               ...prev,
@@ -1600,7 +1729,7 @@ export default function App() {
                             }))
                           }
                           disabled={controlsDisabled}
-                          className="rounded border border-slate-300 px-2 py-1 text-xs disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
+                          className="rounded border border-slate-300 px-2 py-1 text-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
                         >
                           {doctors.map((doctor) => (
                             <option key={doctor.id} value={doctor.id}>
@@ -1608,6 +1737,11 @@ export default function App() {
                             </option>
                           ))}
                         </select>
+                        {isCertified && (
+                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-emerald-800">
+                            Atestovaný
+                          </span>
+                        )}
                         <button
                           type="button"
                           onClick={() => applyResultDayChangeAndRecalculate(day)}
@@ -1655,16 +1789,14 @@ export default function App() {
                         const isLocked = locks[day] != null;
                         const isSoftLock = isSoftWantLockedDay(day);
                         const controlsDisabled = isLocked && !isSoftLock;
+                        const assignedDoctorId = resultSelectionByDay[day] ?? result.assignments[day];
                         return (
                           <>
                             <div className="text-[10px] font-semibold text-slate-600 sm:text-xs">{day}</div>
-                            <div className="mt-1 truncate text-[10px] leading-tight sm:text-sm">
-                              {doctors.find((d) => d.id === result.assignments[day])?.name ?? '—'}
-                            </div>
                             <div className="no-print mt-2">
                               <div className={`flex flex-col gap-1 ${isLocked ? 'opacity-60' : ''}`}>
                                 <select
-                                  value={resultSelectionByDay[day] ?? result.assignments[day]}
+                                  value={assignedDoctorId}
                                   onChange={(e) =>
                                     setResultSelectionByDay((prev) => ({
                                       ...prev,
@@ -1672,7 +1804,7 @@ export default function App() {
                                     }))
                                   }
                                   disabled={controlsDisabled}
-                                  className="rounded border border-slate-300 px-1 py-1 text-[10px] sm:text-xs disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
+                                  className="rounded border border-slate-300 px-1 py-1 text-xs sm:text-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
                                 >
                                   {doctors.map((doctor) => (
                                     <option key={doctor.id} value={doctor.id}>

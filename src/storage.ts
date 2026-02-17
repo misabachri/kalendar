@@ -23,6 +23,7 @@ export interface PersistedState {
     finalizedAt?: string;
   };
   finalizedAt?: string;
+  lastResult?: ScheduleResult | null;
 }
 
 export interface SavedScheduleVersion {
@@ -144,6 +145,7 @@ function coerceState(rawParsed: unknown, fallback: PersistedState): PersistedSta
     activePlanSlot: parsed.activePlanSlot === 2 ? 2 : 1,
     secondaryPlan: normalizedSecondary,
     finalizedAt: parsed.finalizedAt,
+    lastResult: parsed.lastResult ?? null,
   };
 }
 
@@ -161,18 +163,12 @@ function defaultMaxByDoctor(doctors: Doctor[]): Record<number, number> {
   return Object.fromEntries(doctors.map((doctor) => [doctor.id, defaultMaxForDoctor(doctor)]));
 }
 
-function defaultTargetForDoctor(doctor: Doctor, maxShiftsByDoctor: Record<number, number>): number {
-  if (doctor.role === 'primar') {
-    return 1;
-  }
-  if (doctor.role === 'zastupce') {
-    return 2;
-  }
-  return Math.max(0, Math.floor(maxShiftsByDoctor[doctor.id] ?? 5));
+function defaultTargetForDoctor(doctorId: number, maxShiftsByDoctor: Record<number, number>): number {
+  return Math.max(0, Math.floor(maxShiftsByDoctor[doctorId] ?? 5));
 }
 
 function defaultTargets(doctors: Doctor[], maxShiftsByDoctor: Record<number, number>): Record<number, number> {
-  return Object.fromEntries(doctors.map((doctor) => [doctor.id, defaultTargetForDoctor(doctor, maxShiftsByDoctor)]));
+  return Object.fromEntries(doctors.map((doctor) => [doctor.id, defaultTargetForDoctor(doctor.id, maxShiftsByDoctor)]));
 }
 
 export function makeDefaultState(): PersistedState {
@@ -202,6 +198,7 @@ export function makeDefaultState(): PersistedState {
       seed: '',
       finalizedAt: undefined,
     },
+    lastResult: null,
   };
 }
 

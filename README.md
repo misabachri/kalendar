@@ -63,14 +63,13 @@ V Xcode pak vyberte simulator nebo fyzicky iPhone a dejte `Run`.
 3. Po službě je povinný den volna (D a D+1 nelze stejný lékař).
 4. Přesah minulého měsíce: zadává se, kdo sloužil poslední 2 dny minulého měsíce; lékař z posledního dne nesmí den 1.
 5. Primář a zástupce:
-   - nikdy Pá/So/Ne
-   - primář maximálně 1 služba za měsíc
-   - zástupce maximálně 2 služby za měsíc
+   - mají stejná pravidla jako ostatní a řídí se nastaveným maximem služeb
 6. Zamčené služby jsou tvrdé pravidlo; konflikty se hlásí.
-7. U každého běžného lékaře lze zadat maximální počet služeb za měsíc.
+7. U každého lékaře lze zadat maximální počet služeb za měsíc.
 8. U každého lékaře lze zadat požadovaný počet služeb; solver je nejdřív zkusí splnit přesně.
 9. Víkendový blok `Pá–Ne` se počítá jako jeden celek; každý lékař může mít maximálně 2 takové bloky za měsíc.
 10. Atestovaní lékaři jsou #1–#5 a musí pokrýt všechny úterky a čtvrtky.
+11. Vzor obden (D a D+2 stejný lékař) je povolen maximálně jednou za měsíc na jednoho lékaře.
 
 ### Cíle a fallback
 
@@ -82,7 +81,7 @@ V Xcode pak vyberte simulator nebo fyzicky iPhone a dejte `Run`.
 1. `Chce` se bere jako tvrdý požadavek dne: pokud je na dni alespoň jedno `Chce`, službu musí dostat lékař s nejvyšší prioritou podle pořadí (nejnižší číslo). `Nechce` je penalizace.
    Pokud má lékař více dní `Chce` než svůj požadovaný počet služeb, vynucení `Chce` se u něj uplatní jen do výše cíle; další `Chce` jsou už jen preference.
 2. Hlavní preference je držet požadované počty služeb u jednotlivých lékařů.
-3. Penalizace vzoru obden (D a D+2 stejný lékař).
+3. Penalizace vzoru obden (D a D+2 stejný lékař) v rámci povoleného maxima.
 4. Preferovat, aby lékař nesloužil den před svou ambulancí (měkké pravidlo).
 5. Vyrovnávání víkendové zátěže (Pá/So/Ne).
 

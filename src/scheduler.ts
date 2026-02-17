@@ -18,10 +18,6 @@ interface SolveState {
 
 type WantedDoctorsByDay = Record<number, number[]>;
 
-function isLeadershipDoctor(doctor: Doctor): boolean {
-  return doctor.role === 'primar' || doctor.role === 'zastupce';
-}
-
 function isCertifiedDoctor(doctor: Doctor): boolean {
   return doctor.order <= 5;
 }
@@ -52,14 +48,6 @@ function makeRng(seed?: string): () => number {
 function initialCaps(doctors: Doctor[], maxShiftsByDoctor: Record<number, number>): Record<number, number> {
   const caps: Record<number, number> = {};
   for (const doctor of doctors) {
-    if (doctor.role === 'primar') {
-      caps[doctor.id] = 1;
-      continue;
-    }
-    if (doctor.role === 'zastupce') {
-      caps[doctor.id] = 2;
-      continue;
-    }
     const maxRaw = maxShiftsByDoctor[doctor.id];
     const max = Number.isFinite(maxRaw) ? Math.floor(maxRaw) : 5;
     caps[doctor.id] = Math.max(0, max);
@@ -128,6 +116,17 @@ function hasPreferenceOverrideLock(day: number, doctor: Doctor, input: ScheduleI
   return forced === doctor.id && preferenceAt(input.preferences, doctor.id, day) === 1;
 }
 
+function countAlternatingPairs(assignments: Record<number, number>, doctorId: number): number {
+  let count = 0;
+  for (const [dayRaw, assignedDoctorId] of Object.entries(assignments)) {
+    const day = Number(dayRaw);
+    if (assignedDoctorId === doctorId && assignments[day + 2] === doctorId) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 function isHardAllowed(
   day: number,
   doctor: Doctor,
@@ -157,10 +156,6 @@ function isHardAllowed(
     return false;
   }
 
-  if (isLeadershipDoctor(doctor) && isWeekendServiceDay(input.year, input.month, day)) {
-    return false;
-  }
-
   if (
     isTuesdayOrThursday(input.year, input.month, day) &&
     !isCertifiedDoctor(doctor) &&
@@ -182,6 +177,14 @@ function isHardAllowed(
   }
 
   if (state.assignments[day + 1] === doctor.id) {
+    return false;
+  }
+
+  const alternatingPairsNow = countAlternatingPairs(state.assignments, doctor.id);
+  const alternatingPairsAdded =
+    (state.assignments[day - 2] === doctor.id ? 1 : 0) +
+    (state.assignments[day + 2] === doctor.id ? 1 : 0);
+  if (alternatingPairsNow + alternatingPairsAdded > 1) {
     return false;
   }
 
@@ -216,10 +219,6 @@ function isBaseHardAllowedForDiscussion(
     return false;
   }
 
-  if (isLeadershipDoctor(doctor) && isWeekendServiceDay(input.year, input.month, day)) {
-    return false;
-  }
-
   if (
     isTuesdayOrThursday(input.year, input.month, day) &&
     !isCertifiedDoctor(doctor) &&
@@ -233,6 +232,14 @@ function isBaseHardAllowedForDiscussion(
   }
 
   if (state.assignments[day + 1] === doctor.id) {
+    return false;
+  }
+
+  const alternatingPairsNow = countAlternatingPairs(state.assignments, doctor.id);
+  const alternatingPairsAdded =
+    (state.assignments[day - 2] === doctor.id ? 1 : 0) +
+    (state.assignments[day + 2] === doctor.id ? 1 : 0);
+  if (alternatingPairsNow + alternatingPairsAdded > 1) {
     return false;
   }
 
@@ -327,9 +334,6 @@ function validateLocks(
     if (preferenceAt(input.preferences, docId, day) === 1 && lockedDoctor(input.locks, day) !== docId) {
       issues.push(`Den ${day}: zamčení je v konfliktu s "Nemůže" (${doctor.name}).`);
     }
-    if (isLeadershipDoctor(doctor) && isWeekendServiceDay(input.year, input.month, day)) {
-      issues.push(`Den ${day}: ${doctor.name} nemůže sloužit Pá/So/Ne.`);
-    }
     if (
       isTuesdayOrThursday(input.year, input.month, day) &&
       !isCertifiedDoctor(doctor) &&
@@ -369,6 +373,15 @@ function validateLocks(
     const weekendBlockCount = Object.keys(lockedWeekendBlocksByDoctor[doctor.id] ?? {}).length;
     if (weekendBlockCount > 2) {
       issues.push(`${doctor.name}: zamčené služby překračují limit 2 víkendových bloků (Pá–Ne).`);
+    }
+    let alternatingPairCount = 0;
+    for (let day = 1; day <= days - 2; day += 1) {
+      if (lockedDoctor(input.locks, day) === doctor.id && lockedDoctor(input.locks, day + 2) === doctor.id) {
+        alternatingPairCount += 1;
+      }
+    }
+    if (alternatingPairCount > 1) {
+      issues.push(`${doctor.name}: zamčené služby obsahují více než jeden vzor obden (D a D+2).`);
     }
   }
 
@@ -603,8 +616,7 @@ function buildPartialProposal(
   const assignments: Record<number, number | null> = {};
   const unassignedDays: Array<{ day: number; candidateDoctorIds: number[] }> = [];
 
-  const canLeadershipTakeMore = (doctor: Doctor): boolean =>
-    !isLeadershipDoctor(doctor) || (state.counts[doctor.id] ?? 0) < (caps[doctor.id] ?? 0);
+  const canTakeMore = (doctor: Doctor): boolean => (state.counts[doctor.id] ?? 0) < (caps[doctor.id] ?? 0);
 
   for (let day = 1; day <= days; day += 1) {
     const candidates = input.doctors.filter((doctor) =>
@@ -630,10 +642,10 @@ function buildPartialProposal(
 
         // Relaxation ladder: prefer OK/allowed doctors, but always produce a schedule.
         const preferredNonCannot = emergencyDoctors.filter(
-          (doctor) => preferenceAt(input.preferences, doctor.id, day) !== 1 && canLeadershipTakeMore(doctor),
+          (doctor) => preferenceAt(input.preferences, doctor.id, day) !== 1 && canTakeMore(doctor),
         );
         const anyNonCannot = emergencyDoctors.filter((doctor) => preferenceAt(input.preferences, doctor.id, day) !== 1);
-        const anyAllowedByLeadershipCap = emergencyDoctors.filter((doctor) => canLeadershipTakeMore(doctor));
+        const anyAllowedByCap = emergencyDoctors.filter((doctor) => canTakeMore(doctor));
         const absolutelyAny = emergencyDoctors;
 
         const emergencyCandidates = (
@@ -641,8 +653,8 @@ function buildPartialProposal(
             ? preferredNonCannot
             : anyNonCannot.length > 0
               ? anyNonCannot
-              : anyAllowedByLeadershipCap.length > 0
-                ? anyAllowedByLeadershipCap
+              : anyAllowedByCap.length > 0
+                ? anyAllowedByCap
                 : absolutelyAny
         ).map((doctor) => doctor.id);
         const selectedDoctorId = emergencyCandidates[0] ?? null;
