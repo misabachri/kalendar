@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { CZECH_MONTHS, WEEKDAY_SHORT } from './constants';
 import { generateSchedule } from './scheduler';
-import { loadState, saveState } from './storage';
+import { loadBackupState, loadState, parseStateFromJson, saveBackupState, saveState, type PersistedState } from './storage';
 import type { Doctor, PreferenceValue, ScheduleResult } from './types';
 import { daysInMonth, weekdayMondayIndex } from './utils/date';
 
@@ -54,6 +54,16 @@ function downloadCsv(content: string, filename: string): void {
   URL.revokeObjectURL(url);
 }
 
+function downloadJson(content: string, filename: string): void {
+  const blob = new Blob([content], { type: 'application/json;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 function monthCells(year: number, month: number, dayCount: number): Array<number | null> {
   const firstWeekday = weekdayMondayIndex(year, month, 1);
   const cells: Array<number | null> = Array.from({ length: firstWeekday }, () => null);
@@ -80,6 +90,8 @@ export default function App() {
   const [seed, setSeed] = useState(initial.seed);
   const [result, setResult] = useState<ScheduleResult | null>(null);
   const [activeDoctorId, setActiveDoctorId] = useState(initial.doctors[0]?.id ?? 1);
+  const [backupNotice, setBackupNotice] = useState<string | null>(null);
+  const backupFileInputRef = useRef<HTMLInputElement>(null);
 
   const dayCount = useMemo(() => daysInMonth(year, month), [year, month]);
   const cells = useMemo(() => monthCells(year, month, dayCount), [year, month, dayCount]);
@@ -190,20 +202,84 @@ export default function App() {
     }));
   };
 
+  const currentState = (): PersistedState => ({
+    year,
+    month,
+    doctors,
+    maxShiftsByDoctor,
+    targetShiftsByDoctor,
+    preferences,
+    locks,
+    previousMonthLastTwo,
+    seed,
+  });
+
+  const applyPersistedState = (next: PersistedState): void => {
+    setYear(next.year);
+    setMonth(next.month);
+    setDoctors(next.doctors);
+    setMaxShiftsByDoctor(next.maxShiftsByDoctor);
+    setTargetShiftsByDoctor(next.targetShiftsByDoctor);
+    setPreferences(next.preferences);
+    setLocks(next.locks);
+    setPreviousMonthLastTwo(next.previousMonthLastTwo);
+    setSeed(next.seed);
+    setActiveDoctorId(next.doctors[0]?.id ?? 1);
+    setResult(null);
+    saveState(next);
+  };
+
+  const saveBackupToDevice = () => {
+    saveBackupState(currentState());
+    setBackupNotice('Záloha byla uložena do zařízení.');
+  };
+
+  const exportBackupFile = () => {
+    const state = currentState();
+    const filename = `kalendar-zaloha-${state.year}-${String(state.month).padStart(2, '0')}.json`;
+    downloadJson(JSON.stringify(state, null, 2), filename);
+    setBackupNotice('Záloha byla stažena jako soubor JSON.');
+  };
+
+  const restoreBackupFromDevice = () => {
+    const backup = loadBackupState();
+    if (!backup) {
+      setBackupNotice('V zařízení nebyla nalezena žádná záloha.');
+      return;
+    }
+    applyPersistedState(backup);
+    setBackupNotice('Poslední záloha byla načtena.');
+  };
+
+  const importBackupFile = async (file: File | null) => {
+    if (!file) {
+      return;
+    }
+    const text = await file.text();
+    const parsed = parseStateFromJson(text);
+    if (!parsed) {
+      setBackupNotice('Soubor se nepodařilo načíst. Zkontrolujte, že jde o platnou zálohu JSON.');
+      return;
+    }
+    applyPersistedState(parsed);
+    saveBackupState(parsed);
+    setBackupNotice('Záloha ze souboru byla načtena.');
+  };
+
   return (
-    <div className="mx-auto max-w-[1200px] px-4 py-6 text-slate-900">
-      <h1 className="mb-4 text-2xl font-bold">Měsíční přehled sloužících lékařů</h1>
+    <div className="mx-auto max-w-[1200px] px-3 py-4 text-slate-900 sm:px-4 sm:py-6">
+      <h1 className="mb-4 text-xl font-bold sm:text-2xl">Měsíční přehled sloužících lékařů</h1>
 
       <div className="no-print space-y-6">
         <section className="rounded-lg bg-white p-4 shadow-sm">
           <h2 className="mb-3 text-lg font-semibold">1) Měsíc + rok</h2>
           <div className="flex flex-wrap gap-3">
-            <label className="flex items-center gap-2">
+            <label className="flex w-full items-center gap-2 sm:w-auto">
               <span>Měsíc</span>
               <select
                 value={month}
                 onChange={(e) => setMonth(Number(e.target.value))}
-                className="rounded border border-slate-300 px-2 py-1"
+                className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 sm:flex-none"
               >
                 {CZECH_MONTHS.map((m, i) => (
                   <option key={m} value={i + 1}>
@@ -212,22 +288,22 @@ export default function App() {
                 ))}
               </select>
             </label>
-            <label className="flex items-center gap-2">
+            <label className="flex w-full items-center gap-2 sm:w-auto">
               <span>Rok</span>
               <input
                 type="number"
                 value={year}
                 onChange={(e) => setYear(Number(e.target.value))}
-                className="w-28 rounded border border-slate-300 px-2 py-1"
+                className="w-full rounded border border-slate-300 px-2 py-1 sm:w-28"
               />
             </label>
-            <label className="flex items-center gap-2">
+            <label className="flex w-full items-center gap-2 sm:w-auto">
               <span>Seed (volitelný)</span>
               <input
                 type="text"
                 value={seed}
                 onChange={(e) => setSeed(e.target.value)}
-                className="rounded border border-slate-300 px-2 py-1"
+                className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1"
                 placeholder="např. pokus-2"
               />
             </label>
@@ -253,7 +329,7 @@ export default function App() {
                   />
                   <span className="text-xs uppercase text-slate-500">{roleLabel(doctor.role)}</span>
                 </div>
-                <label className="mb-2 flex items-center gap-2 text-sm">
+                <label className="mb-2 flex flex-wrap items-center gap-2 text-sm">
                   <span>Max služeb/měsíc</span>
                   <input
                     type="number"
@@ -264,7 +340,7 @@ export default function App() {
                     className="w-20 rounded border border-slate-300 px-2 py-1 disabled:bg-slate-100 disabled:text-slate-500"
                   />
                 </label>
-                <label className="flex items-center gap-2 text-sm">
+                <label className="flex flex-wrap items-center gap-2 text-sm">
                   <span>Požadovaný počet služeb</span>
                   <input
                     type="number"
@@ -282,8 +358,8 @@ export default function App() {
         <section className="rounded-lg bg-white p-4 shadow-sm">
           <h2 className="mb-3 text-lg font-semibold">3) Minulý měsíc – poslední 2 dny</h2>
           <div className="grid gap-3 md:grid-cols-2">
-            <label className="flex items-center gap-2">
-              <span className="w-48 text-sm">Předposlední den měsíce</span>
+            <label className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <span className="text-sm sm:w-48">Předposlední den měsíce</span>
               <select
                 value={previousMonthLastTwo.penultimateDoctorId ?? ''}
                 onChange={(e) =>
@@ -292,7 +368,7 @@ export default function App() {
                     penultimateDoctorId: e.target.value ? Number(e.target.value) : null,
                   }))
                 }
-                className="flex-1 rounded border border-slate-300 px-2 py-1"
+                className="w-full rounded border border-slate-300 px-2 py-1 sm:flex-1"
               >
                 <option value="">Nezadáno</option>
                 {doctors.map((doctor) => (
@@ -303,8 +379,8 @@ export default function App() {
               </select>
             </label>
 
-            <label className="flex items-center gap-2">
-              <span className="w-48 text-sm">Poslední den měsíce</span>
+            <label className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <span className="text-sm sm:w-48">Poslední den měsíce</span>
               <select
                 value={previousMonthLastTwo.lastDoctorId ?? ''}
                 onChange={(e) =>
@@ -313,7 +389,7 @@ export default function App() {
                     lastDoctorId: e.target.value ? Number(e.target.value) : null,
                   }))
                 }
-                className="flex-1 rounded border border-slate-300 px-2 py-1"
+                className="w-full rounded border border-slate-300 px-2 py-1 sm:flex-1"
               >
                 <option value="">Nezadáno</option>
                 {doctors.map((doctor) => (
@@ -361,30 +437,32 @@ export default function App() {
             Bez omezení → Nemůže → Nechce → Chce.
           </p>
 
-          <div className="grid grid-cols-7 gap-1 border border-slate-200 p-2">
-            {WEEKDAY_SHORT.map((d) => (
-              <div key={d} className="p-2 text-center text-xs font-semibold text-slate-600">
-                {d}
-              </div>
-            ))}
-            {cells.map((day, idx) => {
-              if (!day || !activeDoctor) {
-                return <div key={idx} className="min-h-20 rounded bg-slate-50" />;
-              }
-              const pref = (preferences[activeDoctor.id]?.[day] ?? 0) as PreferenceValue;
-              return (
-                <button
-                  key={idx}
-                  type="button"
-                  onClick={() => setPref(activeDoctor.id, day)}
-                  className={`min-h-20 rounded border p-2 text-left ${PREF_CLASS[pref]}`}
-                  title={`${activeDoctor.name}: ${PREF_LABELS[pref]}`}
-                >
-                  <div className="text-xs font-semibold">{day}</div>
-                  <div className="mt-1 text-xs">{PREF_SHORT[pref]}</div>
-                </button>
-              );
-            })}
+          <div className="overflow-x-auto">
+            <div className="grid min-w-[620px] grid-cols-7 gap-1 border border-slate-200 p-2">
+              {WEEKDAY_SHORT.map((d) => (
+                <div key={d} className="p-2 text-center text-xs font-semibold text-slate-600">
+                  {d}
+                </div>
+              ))}
+              {cells.map((day, idx) => {
+                if (!day || !activeDoctor) {
+                  return <div key={idx} className="min-h-20 rounded bg-slate-50" />;
+                }
+                const pref = (preferences[activeDoctor.id]?.[day] ?? 0) as PreferenceValue;
+                return (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => setPref(activeDoctor.id, day)}
+                    className={`min-h-20 rounded border p-2 text-left ${PREF_CLASS[pref]}`}
+                    title={`${activeDoctor.name}: ${PREF_LABELS[pref]}`}
+                  >
+                    <div className="text-xs font-semibold">{day}</div>
+                    <div className="mt-1 text-xs">{PREF_SHORT[pref]}</div>
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </section>
 
@@ -395,17 +473,62 @@ export default function App() {
             <button
               type="button"
               onClick={runGeneration}
-              className="rounded bg-slate-900 px-4 py-2 text-white"
+              className="w-full rounded bg-slate-900 px-4 py-2 text-white sm:w-auto"
             >
               Generovat rozpis
             </button>
-            <button type="button" onClick={() => window.print()} className="rounded bg-slate-200 px-4 py-2">
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+            >
               Tisk A4
             </button>
-            <button type="button" onClick={exportCsv} className="rounded bg-slate-200 px-4 py-2">
+            <button type="button" onClick={exportCsv} className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto">
               Export CSV
             </button>
           </div>
+          <div className="mt-3 flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={saveBackupToDevice}
+              className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+            >
+              Uložit zálohu (zařízení)
+            </button>
+            <button
+              type="button"
+              onClick={restoreBackupFromDevice}
+              className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+            >
+              Obnovit poslední zálohu
+            </button>
+            <button
+              type="button"
+              onClick={exportBackupFile}
+              className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+            >
+              Stáhnout zálohu (JSON)
+            </button>
+            <button
+              type="button"
+              onClick={() => backupFileInputRef.current?.click()}
+              className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+            >
+              Načíst zálohu (JSON)
+            </button>
+            <input
+              ref={backupFileInputRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={async (e) => {
+                await importBackupFile(e.target.files?.[0] ?? null);
+                e.currentTarget.value = '';
+              }}
+            />
+          </div>
+          {backupNotice && <p className="mt-3 text-sm text-slate-600">{backupNotice}</p>}
         </section>
       </div>
 
@@ -429,38 +552,40 @@ export default function App() {
 
         {result && result.ok && (
           <>
-            <div className="grid grid-cols-7 gap-1 border border-slate-200 p-2 text-sm">
-              {WEEKDAY_SHORT.map((d) => (
-                <div key={d} className="p-2 text-center font-semibold">
-                  {d}
-                </div>
-              ))}
-              {cells.map((day, idx) => (
-                <div key={idx} className="min-h-24 border border-slate-100 p-2">
-                  {day && (
-                    <>
-                      <div className="text-xs font-semibold text-slate-600">{day}</div>
-                      <div className="mt-1 text-sm">
-                        {doctors.find((d) => d.id === result.assignments[day])?.name ?? '—'}
-                      </div>
-                      <div className="no-print mt-2">
-                        <button
-                          type="button"
-                          onClick={() => toggleLockFromResult(day)}
-                          className="rounded border border-slate-300 px-2 py-1 text-xs"
-                        >
-                          {locks[day] === result.assignments[day] ? 'Odemknout' : 'Zamknout'}
-                        </button>
-                      </div>
-                      {locks[day] != null && (
-                        <div className="mt-1 text-xs font-medium text-blue-700">
-                          Zamčeno: {doctors.find((d) => d.id === locks[day])?.name}
+            <div className="overflow-x-auto">
+              <div className="grid min-w-[620px] grid-cols-7 gap-1 border border-slate-200 p-2 text-sm">
+                {WEEKDAY_SHORT.map((d) => (
+                  <div key={d} className="p-2 text-center font-semibold">
+                    {d}
+                  </div>
+                ))}
+                {cells.map((day, idx) => (
+                  <div key={idx} className="min-h-24 border border-slate-100 p-2">
+                    {day && (
+                      <>
+                        <div className="text-xs font-semibold text-slate-600">{day}</div>
+                        <div className="mt-1 text-sm">
+                          {doctors.find((d) => d.id === result.assignments[day])?.name ?? '—'}
                         </div>
-                      )}
-                    </>
-                  )}
-                </div>
-              ))}
+                        <div className="no-print mt-2">
+                          <button
+                            type="button"
+                            onClick={() => toggleLockFromResult(day)}
+                            className="rounded border border-slate-300 px-2 py-1 text-xs"
+                          >
+                            {locks[day] === result.assignments[day] ? 'Odemknout' : 'Zamknout'}
+                          </button>
+                        </div>
+                        {locks[day] != null && (
+                          <div className="mt-1 text-xs font-medium text-blue-700">
+                            Zamčeno: {doctors.find((d) => d.id === locks[day])?.name}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
             </div>
 
             <div className="mt-4">

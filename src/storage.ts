@@ -1,4 +1,4 @@
-import { STORAGE_KEY, DEFAULT_DOCTORS } from './constants';
+import { STORAGE_KEY, BACKUP_STORAGE_KEY, DEFAULT_DOCTORS } from './constants';
 import type { Doctor, PreferenceValue, PreviousMonthLastTwo } from './types';
 import { dayBeforeMonthStart, sameDate } from './utils/date';
 
@@ -12,6 +12,58 @@ export interface PersistedState {
   locks: Record<number, number | null>;
   previousMonthLastTwo: PreviousMonthLastTwo;
   seed: string;
+}
+
+function coerceState(rawParsed: unknown, fallback: PersistedState): PersistedState {
+  const parsed = rawParsed as PersistedState & {
+    customMaxByDoctor?: Record<number, number>;
+    lastMonthService?: Record<number, string | null>;
+  };
+
+  let previousMonthLastTwo = parsed.previousMonthLastTwo;
+  if (!previousMonthLastTwo && parsed.lastMonthService) {
+    let lastDoctorId: number | null = null;
+    const prevLastDay = dayBeforeMonthStart(parsed.year ?? fallback.year, parsed.month ?? fallback.month);
+    for (const [doctorId, dateRaw] of Object.entries(parsed.lastMonthService)) {
+      if (!dateRaw) {
+        continue;
+      }
+      const d = new Date(dateRaw);
+      if (!Number.isNaN(d.getTime()) && sameDate(d, prevLastDay)) {
+        lastDoctorId = Number(doctorId);
+        break;
+      }
+    }
+    previousMonthLastTwo = { penultimateDoctorId: null, lastDoctorId };
+  }
+
+  const parsedDoctors = Array.isArray(parsed.doctors) ? parsed.doctors : [];
+  let doctors = fallback.doctors;
+  if (parsedDoctors.length === 10) {
+    doctors = parsedDoctors.map((doctor) =>
+      (doctor as { role: string }).role === 'custom' ? { ...doctor, role: 'regular' } : doctor,
+    );
+  } else if (parsedDoctors.length === 9) {
+    doctors = [...parsedDoctors, fallback.doctors[9]];
+  }
+
+  const maxShiftsByDoctor = {
+    ...defaultMaxByDoctor(doctors),
+    ...(parsed.customMaxByDoctor ?? {}),
+    ...(parsed.maxShiftsByDoctor ?? {}),
+  };
+
+  return {
+    ...fallback,
+    ...parsed,
+    doctors,
+    maxShiftsByDoctor,
+    targetShiftsByDoctor: {
+      ...defaultTargets(doctors, maxShiftsByDoctor),
+      ...(parsed.targetShiftsByDoctor ?? {}),
+    },
+    previousMonthLastTwo: previousMonthLastTwo ?? fallback.previousMonthLastTwo,
+  };
 }
 
 function defaultMaxForDoctor(doctor: Doctor): number {
@@ -66,55 +118,7 @@ export function loadState(): PersistedState {
     if (!raw) {
       return fallback;
     }
-    const parsed = JSON.parse(raw) as PersistedState & {
-      customMaxByDoctor?: Record<number, number>;
-      lastMonthService?: Record<number, string | null>;
-    };
-
-    let previousMonthLastTwo = parsed.previousMonthLastTwo;
-    if (!previousMonthLastTwo && parsed.lastMonthService) {
-      let lastDoctorId: number | null = null;
-      const prevLastDay = dayBeforeMonthStart(parsed.year ?? fallback.year, parsed.month ?? fallback.month);
-      for (const [doctorId, dateRaw] of Object.entries(parsed.lastMonthService)) {
-        if (!dateRaw) {
-          continue;
-        }
-        const d = new Date(dateRaw);
-        if (!Number.isNaN(d.getTime()) && sameDate(d, prevLastDay)) {
-          lastDoctorId = Number(doctorId);
-          break;
-        }
-      }
-      previousMonthLastTwo = { penultimateDoctorId: null, lastDoctorId };
-    }
-
-    const parsedDoctors = Array.isArray(parsed.doctors) ? parsed.doctors : [];
-    let doctors = fallback.doctors;
-    if (parsedDoctors.length === 10) {
-      doctors = parsedDoctors.map((doctor) =>
-        (doctor as { role: string }).role === 'custom' ? { ...doctor, role: 'regular' } : doctor,
-      );
-    } else if (parsedDoctors.length === 9) {
-      doctors = [...parsedDoctors, fallback.doctors[9]];
-    }
-
-    const maxShiftsByDoctor = {
-      ...defaultMaxByDoctor(doctors),
-      ...(parsed.customMaxByDoctor ?? {}),
-      ...(parsed.maxShiftsByDoctor ?? {}),
-    };
-
-    return {
-      ...fallback,
-      ...parsed,
-      doctors,
-      maxShiftsByDoctor,
-      targetShiftsByDoctor: {
-        ...defaultTargets(doctors, maxShiftsByDoctor),
-        ...(parsed.targetShiftsByDoctor ?? {}),
-      },
-      previousMonthLastTwo: previousMonthLastTwo ?? fallback.previousMonthLastTwo,
-    };
+    return coerceState(JSON.parse(raw), fallback);
   } catch {
     return fallback;
   }
@@ -122,4 +126,29 @@ export function loadState(): PersistedState {
 
 export function saveState(state: PersistedState): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+export function parseStateFromJson(raw: string): PersistedState | null {
+  try {
+    const fallback = makeDefaultState();
+    return coerceState(JSON.parse(raw), fallback);
+  } catch {
+    return null;
+  }
+}
+
+export function saveBackupState(state: PersistedState): void {
+  localStorage.setItem(BACKUP_STORAGE_KEY, JSON.stringify(state));
+}
+
+export function loadBackupState(): PersistedState | null {
+  try {
+    const raw = localStorage.getItem(BACKUP_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    return coerceState(JSON.parse(raw), makeDefaultState());
+  } catch {
+    return null;
+  }
 }

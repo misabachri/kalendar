@@ -16,6 +16,36 @@ npm run build
 npm run preview
 ```
 
+## iOS (Apple) build
+
+Projekt je pripraveny pro iOS pres Capacitor.
+
+1. Nainstalujte nove zavislosti:
+
+```bash
+npm install
+```
+
+2. Vytvorte iOS projekt (jen poprve):
+
+```bash
+npm run ios:init
+```
+
+3. Synchronizujte web build do iOS projektu:
+
+```bash
+npm run ios:sync
+```
+
+4. Otevrete projekt v Xcode:
+
+```bash
+npm run ios:open
+```
+
+V Xcode pak vyberte simulator nebo fyzicky iPhone a dejte `Run`.
+
 ## Použitý stack
 
 - React + TypeScript + Vite
