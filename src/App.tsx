@@ -144,6 +144,19 @@ export default function App() {
     setTargetShiftsByDoctor((prev) => ({ ...prev, [doctorId]: Math.min(safe, maxForDoctor) }));
   };
 
+  const adjustMaxShifts = (doctorId: number, delta: number) => {
+    const doctor = doctors.find((d) => d.id === doctorId);
+    const current = doctor?.role === 'primar' ? 1 : doctor?.role === 'zastupce' ? 2 : (maxShiftsByDoctor[doctorId] ?? 5);
+    const next = Math.max(0, current + delta);
+    updateMaxShifts(doctorId, String(next));
+  };
+
+  const adjustTargetShifts = (doctorId: number, delta: number) => {
+    const current = targetShiftsByDoctor[doctorId] ?? 0;
+    const next = Math.max(0, current + delta);
+    updateTargetShifts(doctorId, String(next));
+  };
+
   const setPref = (doctorId: number, day: number) => {
     setPreferences((prev) => {
       const current = (prev[doctorId]?.[day] ?? 0) as PreferenceValue;
@@ -201,6 +214,8 @@ export default function App() {
       [day]: prev[day] === assignedDoctorId ? null : assignedDoctorId,
     }));
   };
+
+  const weekdayShortForDay = (day: number): string => WEEKDAY_SHORT[weekdayMondayIndex(year, month, day)];
 
   const currentState = (): PersistedState => ({
     year,
@@ -331,24 +346,62 @@ export default function App() {
                 </div>
                 <label className="mb-2 flex flex-wrap items-center gap-2 text-sm">
                   <span>Max služeb/měsíc</span>
-                  <input
-                    type="number"
-                    min={0}
-                    value={doctor.role === 'primar' ? 1 : doctor.role === 'zastupce' ? 2 : (maxShiftsByDoctor[doctor.id] ?? 5)}
-                    onChange={(e) => updateMaxShifts(doctor.id, e.target.value)}
-                    disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
-                    className="w-20 rounded border border-slate-300 px-2 py-1 disabled:bg-slate-100 disabled:text-slate-500"
-                  />
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => adjustMaxShifts(doctor.id, -1)}
+                      disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
+                      className="rounded border border-slate-300 px-2 py-1 leading-none disabled:bg-slate-100 disabled:text-slate-500"
+                      aria-label={`Snížit max služeb pro ${doctor.name}`}
+                    >
+                      -
+                    </button>
+                    <input
+                      type="number"
+                      min={0}
+                      value={doctor.role === 'primar' ? 1 : doctor.role === 'zastupce' ? 2 : (maxShiftsByDoctor[doctor.id] ?? 5)}
+                      onChange={(e) => updateMaxShifts(doctor.id, e.target.value)}
+                      disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
+                      className="w-20 rounded border border-slate-300 px-2 py-1 text-center disabled:bg-slate-100 disabled:text-slate-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => adjustMaxShifts(doctor.id, 1)}
+                      disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
+                      className="rounded border border-slate-300 px-2 py-1 leading-none disabled:bg-slate-100 disabled:text-slate-500"
+                      aria-label={`Zvýšit max služeb pro ${doctor.name}`}
+                    >
+                      +
+                    </button>
+                  </div>
                 </label>
                 <label className="flex flex-wrap items-center gap-2 text-sm">
                   <span>Požadovaný počet služeb</span>
-                  <input
-                    type="number"
-                    min={0}
-                    value={targetShiftsByDoctor[doctor.id] ?? 0}
-                    onChange={(e) => updateTargetShifts(doctor.id, e.target.value)}
-                    className="w-20 rounded border border-slate-300 px-2 py-1"
-                  />
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => adjustTargetShifts(doctor.id, -1)}
+                      className="rounded border border-slate-300 px-2 py-1 leading-none"
+                      aria-label={`Snížit požadovaný počet služeb pro ${doctor.name}`}
+                    >
+                      -
+                    </button>
+                    <input
+                      type="number"
+                      min={0}
+                      value={targetShiftsByDoctor[doctor.id] ?? 0}
+                      onChange={(e) => updateTargetShifts(doctor.id, e.target.value)}
+                      className="w-20 rounded border border-slate-300 px-2 py-1 text-center"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => adjustTargetShifts(doctor.id, 1)}
+                      className="rounded border border-slate-300 px-2 py-1 leading-none"
+                      aria-label={`Zvýšit požadovaný počet služeb pro ${doctor.name}`}
+                    >
+                      +
+                    </button>
+                  </div>
                 </label>
               </div>
             ))}
@@ -437,16 +490,15 @@ export default function App() {
             Bez omezení → Nemůže → Nechce → Chce.
           </p>
 
-          <div className="overflow-x-auto">
-            <div className="grid min-w-[620px] grid-cols-7 gap-1 border border-slate-200 p-2">
+          <div className="grid grid-cols-7 gap-1 border border-slate-200 p-1 sm:p-2">
               {WEEKDAY_SHORT.map((d) => (
-                <div key={d} className="p-2 text-center text-xs font-semibold text-slate-600">
+                <div key={d} className="p-1 text-center text-[10px] font-semibold text-slate-600 sm:p-2 sm:text-xs">
                   {d}
                 </div>
               ))}
               {cells.map((day, idx) => {
                 if (!day || !activeDoctor) {
-                  return <div key={idx} className="min-h-20 rounded bg-slate-50" />;
+                  return <div key={idx} className="min-h-14 rounded bg-slate-50 sm:min-h-20" />;
                 }
                 const pref = (preferences[activeDoctor.id]?.[day] ?? 0) as PreferenceValue;
                 return (
@@ -454,15 +506,14 @@ export default function App() {
                     key={idx}
                     type="button"
                     onClick={() => setPref(activeDoctor.id, day)}
-                    className={`min-h-20 rounded border p-2 text-left ${PREF_CLASS[pref]}`}
+                    className={`min-h-14 rounded border p-1 text-left ${PREF_CLASS[pref]} sm:min-h-20 sm:p-2`}
                     title={`${activeDoctor.name}: ${PREF_LABELS[pref]}`}
                   >
-                    <div className="text-xs font-semibold">{day}</div>
-                    <div className="mt-1 text-xs">{PREF_SHORT[pref]}</div>
+                    <div className="text-[10px] font-semibold sm:text-xs">{day}</div>
+                    <div className="mt-1 text-[10px] leading-tight sm:text-xs">{PREF_SHORT[pref]}</div>
                   </button>
                 );
               })}
-            </div>
           </div>
         </section>
 
@@ -552,19 +603,50 @@ export default function App() {
 
         {result && result.ok && (
           <>
-            <div className="overflow-x-auto">
-              <div className="grid min-w-[620px] grid-cols-7 gap-1 border border-slate-200 p-2 text-sm">
+            <div className="space-y-2 sm:hidden">
+              {Array.from({ length: dayCount }, (_, idx) => idx + 1).map((day) => (
+                <div
+                  key={day}
+                  className={`rounded border p-3 ${weekdayShortForDay(day) === 'So' || weekdayShortForDay(day) === 'Ne' ? 'border-slate-300 bg-slate-50' : 'border-slate-200 bg-white'}`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-sm font-semibold text-slate-700">
+                      {weekdayShortForDay(day)} {day}.
+                    </div>
+                    {locks[day] != null && (
+                      <div className="text-xs font-medium text-blue-700">
+                        Zamčeno
+                      </div>
+                    )}
+                  </div>
+                  <div className="mt-1 text-base font-medium">
+                    {doctors.find((d) => d.id === result.assignments[day])?.name ?? '—'}
+                  </div>
+                  <div className="no-print mt-2">
+                    <button
+                      type="button"
+                      onClick={() => toggleLockFromResult(day)}
+                      className="rounded border border-slate-300 px-2 py-1 text-xs"
+                    >
+                      {locks[day] === result.assignments[day] ? 'Odemknout' : 'Zamknout'}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="hidden grid-cols-7 gap-1 border border-slate-200 p-1 text-xs sm:grid sm:p-2 sm:text-sm">
                 {WEEKDAY_SHORT.map((d) => (
-                  <div key={d} className="p-2 text-center font-semibold">
+                  <div key={d} className="p-1 text-center font-semibold sm:p-2">
                     {d}
                   </div>
                 ))}
                 {cells.map((day, idx) => (
-                  <div key={idx} className="min-h-24 border border-slate-100 p-2">
+                  <div key={idx} className="min-h-20 border border-slate-100 p-1 sm:min-h-24 sm:p-2">
                     {day && (
                       <>
-                        <div className="text-xs font-semibold text-slate-600">{day}</div>
-                        <div className="mt-1 text-sm">
+                        <div className="text-[10px] font-semibold text-slate-600 sm:text-xs">{day}</div>
+                        <div className="mt-1 truncate text-[10px] leading-tight sm:text-sm">
                           {doctors.find((d) => d.id === result.assignments[day])?.name ?? '—'}
                         </div>
                         <div className="no-print mt-2">
@@ -585,7 +667,6 @@ export default function App() {
                     )}
                   </div>
                 ))}
-              </div>
             </div>
 
             <div className="mt-4">
