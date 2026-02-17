@@ -51,6 +51,30 @@ function coerceState(rawParsed: unknown, fallback: PersistedState): PersistedSta
     if (doctor.id === 2 && doctor.role === 'zastupce' && doctor.name.trim() === 'Zástupce') {
       return { ...doctor, name: 'Fero (zástupce)' };
     }
+    if (doctor.id === 3) {
+      return { ...doctor, name: 'Tom' };
+    }
+    if (doctor.id === 4) {
+      return { ...doctor, name: 'Lukáš' };
+    }
+    if (doctor.id === 5) {
+      return { ...doctor, name: 'Zdeněk' };
+    }
+    if (doctor.id === 6) {
+      return { ...doctor, name: 'Bachri' };
+    }
+    if (doctor.id === 7) {
+      return { ...doctor, name: 'Kuba' };
+    }
+    if (doctor.id === 8) {
+      return { ...doctor, name: 'Adam' };
+    }
+    if (doctor.id === 9) {
+      return { ...doctor, name: 'Pepa' };
+    }
+    if (doctor.id === 10) {
+      return { ...doctor, name: 'Radim' };
+    }
     return doctor;
   });
 

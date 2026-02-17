@@ -6,6 +6,7 @@ import type {
   ScheduleResult,
   ScheduleStats,
 } from './types';
+import { AMBULANCE_WEEKDAYS_BY_DOCTOR_ID } from './constants';
 import { daysInMonth, isFriday, isWeekendServiceDay, weekday } from './utils/date';
 
 interface SolveState {
@@ -185,6 +186,53 @@ function isHardAllowed(
   return true;
 }
 
+function isBaseHardAllowedForDiscussion(
+  day: number,
+  doctor: Doctor,
+  state: SolveState,
+  input: ScheduleInput,
+): boolean {
+  const forced = lockedDoctor(input.locks, day);
+  if (forced !== null && forced !== doctor.id) {
+    return false;
+  }
+
+  const pref = preferenceAt(input.preferences, doctor.id, day);
+  if (pref === 1) {
+    return false;
+  }
+
+  if (day === 1 && hasCrossMonthRestBlock(doctor.id, input.previousMonthLastTwo.lastDoctorId)) {
+    return false;
+  }
+
+  if (isLeadershipDoctor(doctor) && isWeekendServiceDay(input.year, input.month, day)) {
+    return false;
+  }
+
+  if (isTuesdayOrThursday(input.year, input.month, day) && !isCertifiedDoctor(doctor)) {
+    return false;
+  }
+
+  if (state.assignments[day - 1] === doctor.id) {
+    return false;
+  }
+
+  if (state.assignments[day + 1] === doctor.id) {
+    return false;
+  }
+
+  const weekendKey = weekendBlockKey(input.year, input.month, day);
+  if (weekendKey) {
+    const hasThisBlock = (state.weekendBlocksByDoctor[doctor.id]?.[weekendKey] ?? 0) > 0;
+    if (!hasThisBlock && (state.weekendBlockTotals[doctor.id] ?? 0) >= 2) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function scoreCandidate(
   day: number,
   doctor: Doctor,
@@ -228,6 +276,13 @@ function scoreCandidate(
 
   if (isFriday(input.year, input.month, day) && state.assignments[day + 2] === doctor.id) {
     score -= 6;
+  }
+
+  // Soft preference: avoid assigning a doctor the day before their ambulance day.
+  const clinicWeekdays = AMBULANCE_WEEKDAYS_BY_DOCTOR_ID[doctor.id] ?? [];
+  const nextWeekday = (weekday(input.year, input.month, day) + 1) % 7;
+  if (clinicWeekdays.includes(nextWeekday)) {
+    score += 18;
   }
 
   const wd = weekday(input.year, input.month, day);
@@ -370,6 +425,31 @@ function strictTargetFeasible(
   return needTotal <= remainingDays;
 }
 
+function createInitialState(doctors: Doctor[]): SolveState {
+  return {
+    assignments: {},
+    counts: Object.fromEntries(doctors.map((d) => [d.id, 0])),
+    weekendBlocksByDoctor: Object.fromEntries(doctors.map((d) => [d.id, {}])),
+    weekendBlockTotals: Object.fromEntries(doctors.map((d) => [d.id, 0])),
+  };
+}
+
+function applyAssignment(state: SolveState, year: number, month: number, day: number, doctorId: number): void {
+  const weekendKey = weekendBlockKey(year, month, day);
+  state.assignments[day] = doctorId;
+  state.counts[doctorId] = (state.counts[doctorId] ?? 0) + 1;
+
+  if (!weekendKey) {
+    return;
+  }
+  const byDoctor = state.weekendBlocksByDoctor[doctorId];
+  const prevCount = byDoctor[weekendKey] ?? 0;
+  byDoctor[weekendKey] = prevCount + 1;
+  if (prevCount === 0) {
+    state.weekendBlockTotals[doctorId] = (state.weekendBlockTotals[doctorId] ?? 0) + 1;
+  }
+}
+
 function solveWithCaps(
   input: ScheduleInput,
   caps: Record<number, number>,
@@ -389,10 +469,7 @@ function solveWithCaps(
   }
 
   const state: SolveState = {
-    assignments: {},
-    counts: Object.fromEntries(input.doctors.map((d) => [d.id, 0])),
-    weekendBlocksByDoctor: Object.fromEntries(input.doctors.map((d) => [d.id, {}])),
-    weekendBlockTotals: Object.fromEntries(input.doctors.map((d) => [d.id, 0])),
+    ...createInitialState(input.doctors),
   };
 
   const backtrack = (): boolean => {
@@ -442,16 +519,7 @@ function solveWithCaps(
 
     for (const doctor of targetCandidates) {
       const weekendKey = weekendBlockKey(input.year, input.month, targetDay);
-      state.assignments[targetDay] = doctor.id;
-      state.counts[doctor.id] = (state.counts[doctor.id] ?? 0) + 1;
-      if (weekendKey) {
-        const byDoctor = state.weekendBlocksByDoctor[doctor.id];
-        const prevCount = byDoctor[weekendKey] ?? 0;
-        byDoctor[weekendKey] = prevCount + 1;
-        if (prevCount === 0) {
-          state.weekendBlockTotals[doctor.id] = (state.weekendBlockTotals[doctor.id] ?? 0) + 1;
-        }
-      }
+      applyAssignment(state, input.year, input.month, targetDay, doctor.id);
 
       let forwardOk = true;
       for (let day = 1; day <= days; day += 1) {
@@ -497,6 +565,54 @@ function solveWithCaps(
     return { ok: false, reason: 'Backtracking nenašel řešení při aktuálních limitech.' };
   }
   return { ok: true, assignments: state.assignments };
+}
+
+function buildPartialProposal(
+  input: ScheduleInput,
+  caps: Record<number, number>,
+  targets: Record<number, number>,
+  wantedDoctorsByDay: WantedDoctorsByDay,
+  rng: () => number,
+): {
+  assignments: Record<number, number | null>;
+  unassignedDays: Array<{ day: number; candidateDoctorIds: number[] }>;
+} {
+  const days = daysInMonth(input.year, input.month);
+  const poolIds = input.doctors.filter((d) => isPoolDoctor(d)).map((d) => d.id);
+  const state = createInitialState(input.doctors);
+  const assignments: Record<number, number | null> = {};
+  const unassignedDays: Array<{ day: number; candidateDoctorIds: number[] }> = [];
+
+  for (let day = 1; day <= days; day += 1) {
+    const candidates = input.doctors.filter((doctor) =>
+      isHardAllowed(day, doctor, state, caps, false, targets, wantedDoctorsByDay, input),
+    );
+
+    if (candidates.length === 0) {
+      const discussionCandidates = input.doctors
+        .filter((doctor) => isBaseHardAllowedForDiscussion(day, doctor, state, input))
+        .sort((a, b) => a.order - b.order)
+        .map((doctor) => doctor.id);
+      assignments[day] = null;
+      unassignedDays.push({ day, candidateDoctorIds: discussionCandidates });
+      continue;
+    }
+
+    candidates.sort((a, b) => {
+      const as = scoreCandidate(day, a, state, input, poolIds, targets) + rng() * 0.001;
+      const bs = scoreCandidate(day, b, state, input, poolIds, targets) + rng() * 0.001;
+      if (as !== bs) {
+        return as - bs;
+      }
+      return a.order - b.order;
+    });
+
+    const chosen = candidates[0];
+    assignments[day] = chosen.id;
+    applyAssignment(state, input.year, input.month, day, chosen.id);
+  }
+
+  return { assignments, unassignedDays };
 }
 
 function buildStats(
@@ -586,5 +702,6 @@ export function generateSchedule(input: ScheduleInput): ScheduleResult {
     ok: false,
     conflicts: [strictAttempt.reason, fallbackAttempt.reason],
     relaxationsAttempted: emptyRelaxationSummary(),
+    partialProposal: buildPartialProposal(input, caps, targets, wantedDoctorsByDay, rng),
   };
 }

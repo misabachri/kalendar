@@ -41,6 +41,10 @@ function isCertifiedDoctor(doctor: Doctor): boolean {
   return doctor.order <= 5;
 }
 
+function isFixedNamedDoctor(doctor: Doctor): boolean {
+  return doctor.order >= 3;
+}
+
 function cyclePref(current: PreferenceValue): PreferenceValue {
   if (current === 3) {
     return 0;
@@ -64,8 +68,20 @@ function downloadJson(content: string, filename: string): void {
   const link = document.createElement('a');
   link.href = url;
   link.download = filename;
+  link.rel = 'noopener';
+  document.body.appendChild(link);
   link.click();
+  document.body.removeChild(link);
   URL.revokeObjectURL(url);
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function monthCells(year: number, month: number, dayCount: number): Array<number | null> {
@@ -123,6 +139,42 @@ export default function App() {
 
   const updateDoctorName = (id: number, name: string) => {
     setDoctors((prev) => prev.map((d) => (d.id === id ? { ...d, name } : d)));
+  };
+
+  const updateMaxShifts = (doctorId: number, value: string) => {
+    const parsed = Number(value);
+    const safe = Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
+    setMaxShiftsByDoctor((prev) => ({ ...prev, [doctorId]: safe }));
+    setTargetShiftsByDoctor((prev) => ({
+      ...prev,
+      [doctorId]: Math.min(Math.max(0, prev[doctorId] ?? safe), safe),
+    }));
+  };
+
+  const updateTargetShifts = (doctorId: number, value: string) => {
+    const parsed = Number(value);
+    const safe = Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
+    const doctor = doctors.find((d) => d.id === doctorId);
+    const maxForDoctor =
+      doctor?.role === 'primar'
+        ? 1
+        : doctor?.role === 'zastupce'
+          ? 2
+          : Math.max(0, Math.floor(maxShiftsByDoctor[doctorId] ?? 5));
+    setTargetShiftsByDoctor((prev) => ({ ...prev, [doctorId]: Math.min(safe, maxForDoctor) }));
+  };
+
+  const adjustMaxShifts = (doctorId: number, delta: number) => {
+    const doctor = doctors.find((d) => d.id === doctorId);
+    const current = doctor?.role === 'primar' ? 1 : doctor?.role === 'zastupce' ? 2 : (maxShiftsByDoctor[doctorId] ?? 5);
+    const next = Math.max(0, current + delta);
+    updateMaxShifts(doctorId, String(next));
+  };
+
+  const adjustTargetShifts = (doctorId: number, delta: number) => {
+    const current = targetShiftsByDoctor[doctorId] ?? 0;
+    const next = Math.max(0, current + delta);
+    updateTargetShifts(doctorId, String(next));
   };
 
   const setPref = (doctorId: number, day: number) => {
@@ -217,11 +269,79 @@ export default function App() {
     setBackupNotice('Záloha byla uložena do zařízení.');
   };
 
-  const exportBackupFile = () => {
+  const exportBackupFile = async () => {
     const state = currentState();
     const filename = `kalendar-zaloha-${state.year}-${String(state.month).padStart(2, '0')}.json`;
-    downloadJson(JSON.stringify(state, null, 2), filename);
+    const jsonContent = JSON.stringify(state, null, 2);
+    try {
+      const file = new File([jsonContent], filename, { type: 'application/json' });
+      if (navigator.share && navigator.canShare?.({ files: [file] })) {
+        await navigator.share({
+          title: 'Záloha kalendáře služeb',
+          files: [file],
+        });
+        setBackupNotice('Záloha připravena ve sdílení (Soubor / Uložit do souborů).');
+        return;
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        setBackupNotice('Sdílení zálohy bylo zrušeno.');
+        return;
+      }
+    }
+    downloadJson(jsonContent, filename);
     setBackupNotice('Záloha byla stažena jako soubor JSON.');
+  };
+
+  const printSchedule = () => {
+    if (!result || !result.ok) {
+      setBackupNotice('Nejdřív je potřeba vygenerovat rozpis.');
+      return;
+    }
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      setBackupNotice('Pro tisk povolte otevírání nových oken pro tuto stránku.');
+      return;
+    }
+
+    const rows = Array.from({ length: dayCount }, (_, idx) => {
+      const day = idx + 1;
+      const doctorName = doctors.find((d) => d.id === result.assignments[day])?.name ?? '—';
+      const weekdayLabel = WEEKDAY_SHORT[weekdayMondayIndex(year, month, day)];
+      return `<tr><td>${day}</td><td>${weekdayLabel}</td><td>${escapeHtml(doctorName)}</td></tr>`;
+    }).join('');
+
+    printWindow.document.write(`<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rozpis služeb</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 16px; color: #0f172a; }
+    h1 { margin: 0 0 12px; font-size: 20px; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { border: 1px solid #cbd5e1; padding: 8px; text-align: left; }
+    th { background: #f1f5f9; }
+    @media print { body { margin: 10mm; } }
+  </style>
+</head>
+<body>
+  <h1>Služby – ${escapeHtml(CZECH_MONTHS[month - 1])} ${year}</h1>
+  <table>
+    <thead>
+      <tr><th>Den</th><th>Týden</th><th>Lékař</th></tr>
+    </thead>
+    <tbody>${rows}</tbody>
+  </table>
+  <script>
+    window.onload = function () {
+      setTimeout(function () { window.print(); }, 200);
+    };
+  </script>
+</body>
+</html>`);
+    printWindow.document.close();
   };
 
   const restoreBackupFromDevice = () => {
@@ -295,9 +415,6 @@ export default function App() {
 
         <section className="rounded-lg bg-white p-4 shadow-sm">
           <h2 className="mb-3 text-lg font-semibold">2) Lékaři (fixní pořadí #1–#10)</h2>
-          <div className="mb-3 rounded border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
-            Atestovaní jsou #1–#5 a musí krýt úterky a čtvrtky.
-          </div>
           <div className="grid gap-2 md:grid-cols-2">
             {doctors.map((doctor) => (
               <div
@@ -317,8 +434,70 @@ export default function App() {
                   type="text"
                   value={doctor.name}
                   onChange={(e) => updateDoctorName(doctor.id, e.target.value)}
-                  className="w-full min-w-0 rounded border border-slate-300 px-2 py-1"
+                  disabled={isFixedNamedDoctor(doctor)}
+                  className="mb-2 w-full min-w-0 rounded border border-slate-300 px-2 py-1 disabled:bg-slate-100 disabled:text-slate-600"
                 />
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <label className="min-w-0 rounded border border-slate-200 bg-white p-2 text-sm">
+                    <span className="mb-2 block text-xs text-slate-600">Max služeb/měsíc</span>
+                    <div className="flex items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={() => adjustMaxShifts(doctor.id, -1)}
+                        disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
+                        className="rounded border border-slate-300 px-2 py-1 leading-none disabled:bg-slate-100 disabled:text-slate-500"
+                        aria-label={`Snížit max služeb pro ${doctor.name}`}
+                      >
+                        -
+                      </button>
+                      <input
+                        type="number"
+                        min={0}
+                        value={doctor.role === 'primar' ? 1 : doctor.role === 'zastupce' ? 2 : (maxShiftsByDoctor[doctor.id] ?? 5)}
+                        onChange={(e) => updateMaxShifts(doctor.id, e.target.value)}
+                        disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
+                        className="w-16 rounded border border-slate-300 px-1 py-1 text-center disabled:bg-slate-100 disabled:text-slate-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => adjustMaxShifts(doctor.id, 1)}
+                        disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
+                        className="rounded border border-slate-300 px-2 py-1 leading-none disabled:bg-slate-100 disabled:text-slate-500"
+                        aria-label={`Zvýšit max služeb pro ${doctor.name}`}
+                      >
+                        +
+                      </button>
+                    </div>
+                  </label>
+                  <label className="min-w-0 rounded border border-slate-200 bg-white p-2 text-sm">
+                    <span className="mb-2 block text-xs text-slate-600">Požadovaný počet služeb</span>
+                    <div className="flex items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={() => adjustTargetShifts(doctor.id, -1)}
+                        className="rounded border border-slate-300 px-2 py-1 leading-none"
+                        aria-label={`Snížit požadovaný počet služeb pro ${doctor.name}`}
+                      >
+                        -
+                      </button>
+                      <input
+                        type="number"
+                        min={0}
+                        value={targetShiftsByDoctor[doctor.id] ?? 0}
+                        onChange={(e) => updateTargetShifts(doctor.id, e.target.value)}
+                        className="w-16 rounded border border-slate-300 px-1 py-1 text-center"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => adjustTargetShifts(doctor.id, 1)}
+                        className="rounded border border-slate-300 px-2 py-1 leading-none"
+                        aria-label={`Zvýšit požadovaný počet služeb pro ${doctor.name}`}
+                      >
+                        +
+                      </button>
+                    </div>
+                  </label>
+                </div>
               </div>
             ))}
           </div>
@@ -449,7 +628,7 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => window.print()}
+              onClick={printSchedule}
               className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
             >
               Tisk A4
@@ -517,6 +696,29 @@ export default function App() {
                 <li key={c}>{c}</li>
               ))}
             </ul>
+            {result.partialProposal && (
+              <div className="mt-4 rounded border border-amber-300 bg-amber-50 p-3">
+                <p className="text-sm font-semibold text-amber-900">Návrh k debatě (s neobsazenými dny)</p>
+                <ul className="mt-2 space-y-2 text-sm text-amber-900">
+                  {result.partialProposal.unassignedDays.length === 0 && (
+                    <li>V návrhu nevznikly neobsazené dny.</li>
+                  )}
+                  {result.partialProposal.unassignedDays.map((entry) => {
+                    const candidateNames = entry.candidateDoctorIds
+                      .map((id) => doctors.find((doctor) => doctor.id === id)?.name)
+                      .filter((name): name is string => Boolean(name));
+                    return (
+                      <li key={entry.day}>
+                        Den {entry.day} zůstal neobsazený.
+                        {candidateNames.length > 0
+                          ? ` Možní kandidáti k debatě: ${candidateNames.join(', ')}.`
+                          : ' Pro tento den teď není kandidát, který by splnil pravidla.'}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
           </div>
         )}
 

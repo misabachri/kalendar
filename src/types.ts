@@ -52,6 +52,13 @@ export interface ScheduleFailure {
   ok: false;
   conflicts: string[];
   relaxationsAttempted: RelaxationInfo[];
+  partialProposal?: {
+    assignments: Record<number, number | null>;
+    unassignedDays: Array<{
+      day: number;
+      candidateDoctorIds: number[];
+    }>;
+  };
 }
 
 export type ScheduleResult = ScheduleSuccess | ScheduleFailure;
