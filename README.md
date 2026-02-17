@@ -80,6 +80,7 @@ V Xcode pak vyberte simulator nebo fyzicky iPhone a dejte `Run`.
 ### Soft constraints (priorita)
 
 1. `Chce` se bere jako tvrdý požadavek dne: pokud je na dni alespoň jedno `Chce`, službu musí dostat lékař s nejvyšší prioritou podle pořadí (nejnižší číslo). `Nechce` je penalizace.
+   Pokud má lékař více dní `Chce` než svůj požadovaný počet služeb, vynucení `Chce` se u něj uplatní jen do výše cíle; další `Chce` jsou už jen preference.
 2. Penalizace vzoru obden (D a D+2 stejný lékař).
 3. Vyrovnávání počtu služeb mezi běžnými lékaři.
 4. Vyrovnávání víkendové zátěže (Pá/So/Ne).

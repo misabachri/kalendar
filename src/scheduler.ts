@@ -15,7 +15,7 @@ interface SolveState {
   weekendBlockTotals: Record<number, number>;
 }
 
-type ForcedWantsByDay = Record<number, number | null>;
+type WantedDoctorsByDay = Record<number, number[]>;
 
 function isLeadershipDoctor(doctor: Doctor): boolean {
   return doctor.role === 'primar' || doctor.role === 'zastupce';
@@ -88,18 +88,33 @@ function preferenceAt(preferences: Record<number, Record<number, PreferenceValue
   return preferences[doctorId]?.[day] ?? 0;
 }
 
-function computeForcedWantsByDay(input: ScheduleInput): ForcedWantsByDay {
+function computeWantedDoctorsByDay(input: ScheduleInput): WantedDoctorsByDay {
   const days = daysInMonth(input.year, input.month);
-  const byDay: ForcedWantsByDay = {};
+  const byDay: WantedDoctorsByDay = {};
 
   for (let day = 1; day <= days; day += 1) {
     const wantDoctors = input.doctors
       .filter((doctor) => preferenceAt(input.preferences, doctor.id, day) === 3)
       .sort((a, b) => a.order - b.order);
-    byDay[day] = wantDoctors.length > 0 ? wantDoctors[0].id : null;
+    byDay[day] = wantDoctors.map((doctor) => doctor.id);
   }
 
   return byDay;
+}
+
+function forcedWantDoctorForDay(
+  day: number,
+  wantedDoctorsByDay: WantedDoctorsByDay,
+  counts: Record<number, number>,
+  targets: Record<number, number>,
+): number | null {
+  const wantedIds = wantedDoctorsByDay[day] ?? [];
+  for (const doctorId of wantedIds) {
+    if ((counts[doctorId] ?? 0) < (targets[doctorId] ?? 0)) {
+      return doctorId;
+    }
+  }
+  return null;
 }
 
 function lockedDoctor(locks: Record<number, number | null>, day: number): number | null {
@@ -113,10 +128,10 @@ function isHardAllowed(
   caps: Record<number, number>,
   strictTargets: boolean,
   targets: Record<number, number>,
-  forcedWantsByDay: ForcedWantsByDay,
+  wantedDoctorsByDay: WantedDoctorsByDay,
   input: ScheduleInput,
 ): boolean {
-  const forcedWantDoctorId = forcedWantsByDay[day] ?? null;
+  const forcedWantDoctorId = forcedWantDoctorForDay(day, wantedDoctorsByDay, state.counts, targets);
   if (forcedWantDoctorId !== null && forcedWantDoctorId !== doctor.id) {
     return false;
   }
@@ -257,9 +272,15 @@ function weekendBlockKey(year: number, month: number, day: number): string | nul
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-function validateLocks(input: ScheduleInput, caps: Record<number, number>, forcedWantsByDay: ForcedWantsByDay): string[] {
+function validateLocks(
+  input: ScheduleInput,
+  caps: Record<number, number>,
+  targets: Record<number, number>,
+  wantedDoctorsByDay: WantedDoctorsByDay,
+): string[] {
   const issues: string[] = [];
   const days = daysInMonth(input.year, input.month);
+  const lockedCountsBeforeDay: Record<number, number> = {};
 
   for (let day = 1; day <= days; day += 1) {
     const docId = lockedDoctor(input.locks, day);
@@ -272,7 +293,7 @@ function validateLocks(input: ScheduleInput, caps: Record<number, number>, force
       continue;
     }
 
-    const forcedWantDoctorId = forcedWantsByDay[day] ?? null;
+    const forcedWantDoctorId = forcedWantDoctorForDay(day, wantedDoctorsByDay, lockedCountsBeforeDay, targets);
     if (forcedWantDoctorId !== null && forcedWantDoctorId !== docId) {
       const forcedWantDoctor = input.doctors.find((d) => d.id === forcedWantDoctorId);
       issues.push(
@@ -295,6 +316,7 @@ function validateLocks(input: ScheduleInput, caps: Record<number, number>, force
     if (day > 1 && lockedDoctor(input.locks, day - 1) === docId) {
       issues.push(`Dny ${day - 1} a ${day}: ${doctor.name} nemůže sloužit dva dny po sobě.`);
     }
+    lockedCountsBeforeDay[docId] = (lockedCountsBeforeDay[docId] ?? 0) + 1;
   }
 
   const lockCounts: Record<number, number> = {};
@@ -352,7 +374,7 @@ function solveWithCaps(
   input: ScheduleInput,
   caps: Record<number, number>,
   targets: Record<number, number>,
-  forcedWantsByDay: ForcedWantsByDay,
+  wantedDoctorsByDay: WantedDoctorsByDay,
   rng: () => number,
   strictTargets: boolean,
 ): { ok: true; assignments: Record<number, number> } | { ok: false; reason: string } {
@@ -389,7 +411,7 @@ function solveWithCaps(
         continue;
       }
       const candidates = input.doctors.filter((doctor) =>
-        isHardAllowed(day, doctor, state, caps, strictTargets, targets, forcedWantsByDay, input),
+        isHardAllowed(day, doctor, state, caps, strictTargets, targets, wantedDoctorsByDay, input),
       );
       if (candidates.length === 0) {
         return false;
@@ -437,7 +459,7 @@ function solveWithCaps(
           continue;
         }
         const exists = input.doctors.some((d) =>
-          isHardAllowed(day, d, state, caps, strictTargets, targets, forcedWantsByDay, input),
+          isHardAllowed(day, d, state, caps, strictTargets, targets, wantedDoctorsByDay, input),
         );
         if (!exists) {
           forwardOk = false;
@@ -526,10 +548,10 @@ function emptyRelaxationSummary(): RelaxationInfo[] {
 export function generateSchedule(input: ScheduleInput): ScheduleResult {
   const caps = initialCaps(input.doctors, input.maxShiftsByDoctor);
   const targets = sanitizeTargets(input);
-  const forcedWantsByDay = computeForcedWantsByDay(input);
+  const wantedDoctorsByDay = computeWantedDoctorsByDay(input);
   const rng = makeRng(input.seed);
 
-  const lockIssues = validateLocks(input, caps, forcedWantsByDay);
+  const lockIssues = validateLocks(input, caps, targets, wantedDoctorsByDay);
   if (lockIssues.length > 0) {
     return {
       ok: false,
@@ -538,7 +560,7 @@ export function generateSchedule(input: ScheduleInput): ScheduleResult {
     };
   }
 
-  const strictAttempt = solveWithCaps(input, caps, targets, forcedWantsByDay, rng, true);
+  const strictAttempt = solveWithCaps(input, caps, targets, wantedDoctorsByDay, rng, true);
   if (strictAttempt.ok) {
     return {
       ok: true,
@@ -549,7 +571,7 @@ export function generateSchedule(input: ScheduleInput): ScheduleResult {
     };
   }
 
-  const fallbackAttempt = solveWithCaps(input, caps, targets, forcedWantsByDay, rng, false);
+  const fallbackAttempt = solveWithCaps(input, caps, targets, wantedDoctorsByDay, rng, false);
   if (fallbackAttempt.ok) {
     return {
       ok: true,
