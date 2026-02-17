@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AMBULANCE_WEEKDAYS_BY_DOCTOR_ID, CZECH_MONTHS, WEEKDAY_SHORT } from './constants';
 import { generateSchedule } from './scheduler';
+import { isCloudSyncEnabled, loadCloudState, saveCloudState } from './cloudSync';
 import {
   loadBackupState,
   loadSavedVersions,
@@ -18,24 +19,73 @@ import { daysInMonth, isWeekendServiceDay, weekday, weekdayMondayIndex } from '.
 const PREF_LABELS: Record<PreferenceValue, string> = {
   0: 'Bez omezení',
   1: 'Nemůže',
-  2: 'Nechce',
+  2: 'Nemůže',
   3: 'Chce',
 };
 
 const PREF_SHORT: Record<PreferenceValue, string> = {
   0: 'OK',
   1: 'X',
-  2: 'Ne',
+  2: 'X',
   3: 'Chci',
 };
 
 const PREF_CLASS: Record<PreferenceValue, string> = {
   0: 'bg-white text-slate-700 border-slate-200',
   1: 'bg-rose-100 text-rose-800 border-rose-300',
-  2: 'bg-amber-100 text-amber-800 border-amber-300',
+  2: 'bg-rose-100 text-rose-800 border-rose-300',
   3: 'bg-emerald-100 text-emerald-800 border-emerald-300',
 };
-const PREF_VALUES: PreferenceValue[] = [0, 1, 2, 3];
+const PREF_VALUES: PreferenceValue[] = [0, 1, 3];
+
+function normalizedPreference(value: PreferenceValue | number): PreferenceValue {
+  if (value === 2) {
+    return 1;
+  }
+  if (value === 0 || value === 1 || value === 3) {
+    return value;
+  }
+  return 0;
+}
+
+function buildMonthlyPresetPreferences(year: number, month: number): Record<number, Record<number, PreferenceValue>> {
+  const prefs: Record<number, Record<number, PreferenceValue>> = {};
+  const setPref = (doctorId: number, day: number, value: PreferenceValue) => {
+    prefs[doctorId] = { ...(prefs[doctorId] ?? {}), [day]: value };
+  };
+
+  const dayCount = daysInMonth(year, month);
+  for (let day = 1; day <= dayCount; day += 1) {
+    const wd = weekday(year, month, day); // 0=Ne, 1=Po, 2=Ut, ...
+
+    // #1 Primar: chce slouzit jen Ut/ Ct, ostatni dny vysoka nepreference.
+    if (wd === 2 || wd === 4) {
+      setPref(1, day, 3);
+    } else {
+      setPref(1, day, 1);
+    }
+
+    if (wd === 1) {
+      setPref(6, day, 1); // #6 neslouzi pondelky
+      setPref(4, day, 1); // #4 neslouzi pondelky
+    }
+    if (wd === 5) {
+      setPref(4, day, 1); // #4 neslouzi patky
+    }
+    if (wd === 2) {
+      setPref(3, day, 1); // #3 neslouzi uterky
+      setPref(10, day, 1); // #10 neslouzi uterky
+    }
+    if (wd === 3) {
+      setPref(2, day, 1); // Fero neslouzi stredy
+    }
+    if (wd >= 1 && wd <= 5) {
+      setPref(8, day, 1); // #8 neslouzi vsedni dny
+    }
+  }
+
+  return prefs;
+}
 
 function roleLabel(role: Doctor['role']): string {
   if (role === 'primar') {
@@ -56,10 +106,14 @@ function isFixedNamedDoctor(doctor: Doctor): boolean {
 }
 
 function cyclePref(current: PreferenceValue): PreferenceValue {
-  if (current === 3) {
+  const normalized = normalizedPreference(current);
+  if (normalized === 3) {
     return 0;
   }
-  return (current + 1) as PreferenceValue;
+  if (normalized === 0) {
+    return 1;
+  }
+  return 3;
 }
 
 function downloadCsv(content: string, filename: string): void {
@@ -135,6 +189,18 @@ function buildStatsFromAssignments(
   return { totalByDoctor, weekendByDoctor };
 }
 
+function isRemoteStateNewer(remote: PersistedState, local: PersistedState): boolean {
+  const remoteTs = remote.updatedAt ? new Date(remote.updatedAt).getTime() : 0;
+  const localTs = local.updatedAt ? new Date(local.updatedAt).getTime() : 0;
+  if (remoteTs !== localTs) {
+    return remoteTs > localTs;
+  }
+  if (!local.lastResult && remote.lastResult) {
+    return true;
+  }
+  return false;
+}
+
 interface MonthlyRequestPlan {
   year: number;
   month: number;
@@ -155,7 +221,10 @@ export default function App() {
   const [primaryPlan, setPrimaryPlan] = useState<MonthlyRequestPlan>({
     year: initial.year,
     month: initial.month,
-    preferences: initial.preferences,
+    preferences:
+      Object.keys(initial.preferences ?? {}).length > 0
+        ? initial.preferences
+        : buildMonthlyPresetPreferences(initial.year, initial.month),
     locks: initial.locks,
     previousMonthLastTwo: initial.previousMonthLastTwo,
     seed: initial.seed,
@@ -168,7 +237,7 @@ export default function App() {
         return {
           year: nextDate.getFullYear(),
           month: nextDate.getMonth() + 1,
-          preferences: {},
+          preferences: buildMonthlyPresetPreferences(nextDate.getFullYear(), nextDate.getMonth() + 1),
           locks: {},
           previousMonthLastTwo: { penultimateDoctorId: null, lastDoctorId: null },
           seed: '',
@@ -195,6 +264,9 @@ export default function App() {
   const [generationNotice, setGenerationNotice] = useState<string | null>(null);
   const [isExpertMode, setIsExpertMode] = useState(false);
   const backupFileInputRef = useRef<HTMLInputElement>(null);
+  const isApplyingRemoteRef = useRef(false);
+  const cloudSaveTimerRef = useRef<number | null>(null);
+  const cloudSyncEnabled = useMemo(() => isCloudSyncEnabled(), []);
 
   const activePlan = activePlanSlot === 1 ? primaryPlan : secondaryPlan;
   const year = activePlan.year;
@@ -203,6 +275,8 @@ export default function App() {
   const locks = activePlan.locks;
   const previousMonthLastTwo = activePlan.previousMonthLastTwo;
   const seed = activePlan.seed;
+  const preferenceAt = (doctorId: number, day: number): PreferenceValue =>
+    normalizedPreference(preferences[doctorId]?.[day] ?? 0);
 
   const setActivePlan = (updater: (prev: MonthlyRequestPlan) => MonthlyRequestPlan) => {
     if (activePlanSlot === 1) {
@@ -221,7 +295,7 @@ export default function App() {
     setPrimaryPlan((prev) => ({
       ...prev,
       year: nextYear,
-      preferences: {},
+      preferences: buildMonthlyPresetPreferences(nextYear, prev.month),
       locks: {},
       finalizedAt: undefined,
     }));
@@ -231,7 +305,7 @@ export default function App() {
         ...prev,
         year: next.year,
         month: next.month,
-        preferences: {},
+        preferences: buildMonthlyPresetPreferences(next.year, next.month),
         locks: {},
         finalizedAt: undefined,
       };
@@ -242,7 +316,7 @@ export default function App() {
     setPrimaryPlan((prev) => ({
       ...prev,
       month: nextMonth,
-      preferences: {},
+      preferences: buildMonthlyPresetPreferences(prev.year, nextMonth),
       locks: {},
       finalizedAt: undefined,
     }));
@@ -252,7 +326,7 @@ export default function App() {
         ...prev,
         year: next.year,
         month: next.month,
-        preferences: {},
+        preferences: buildMonthlyPresetPreferences(next.year, next.month),
         locks: {},
         finalizedAt: undefined,
       };
@@ -305,7 +379,7 @@ export default function App() {
   }, [doctors, activeDoctorId]);
 
   useEffect(() => {
-    saveState({
+    const persisted: PersistedState = {
       year: primaryPlan.year,
       month: primaryPlan.month,
       doctors,
@@ -317,10 +391,59 @@ export default function App() {
       seed: primaryPlan.seed,
       finalizedAt: primaryPlan.finalizedAt,
       lastResult: result,
+      updatedAt: new Date().toISOString(),
       activePlanSlot,
       secondaryPlan: secondaryPlan,
-    });
-  }, [doctors, maxShiftsByDoctor, targetShiftsByDoctor, primaryPlan, secondaryPlan, activePlanSlot, result]);
+    };
+
+    saveState(persisted);
+    if (!cloudSyncEnabled || isApplyingRemoteRef.current) {
+      return;
+    }
+    if (cloudSaveTimerRef.current !== null) {
+      window.clearTimeout(cloudSaveTimerRef.current);
+    }
+    cloudSaveTimerRef.current = window.setTimeout(() => {
+      void saveCloudState(persisted);
+    }, 700);
+  }, [doctors, maxShiftsByDoctor, targetShiftsByDoctor, primaryPlan, secondaryPlan, activePlanSlot, result, cloudSyncEnabled]);
+
+  useEffect(() => {
+    return () => {
+      if (cloudSaveTimerRef.current !== null) {
+        window.clearTimeout(cloudSaveTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!cloudSyncEnabled) {
+      return;
+    }
+    let cancelled = false;
+    const syncFromCloud = async () => {
+      const remote = await loadCloudState();
+      if (cancelled || !remote) {
+        return;
+      }
+      const local = loadState();
+      if (!isRemoteStateNewer(remote, local)) {
+        return;
+      }
+      isApplyingRemoteRef.current = true;
+      applyPersistedState(remote);
+      isApplyingRemoteRef.current = false;
+      setBackupNotice('Načtena novější cloud verze rozpisu.');
+    };
+    void syncFromCloud();
+    const intervalId = window.setInterval(() => {
+      void syncFromCloud();
+    }, 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [cloudSyncEnabled]);
 
   const updateDoctorName = (id: number, name: string) => {
     setDoctors((prev) => prev.map((d) => (d.id === id ? { ...d, name } : d)));
@@ -398,7 +521,7 @@ export default function App() {
         if (!assignedDoctorId) {
           continue;
         }
-        const pref = preferences[assignedDoctorId]?.[day] ?? 0;
+        const pref = preferenceAt(assignedDoctorId, day);
         if (pref === 3 && mergedLocks[day] !== assignedDoctorId) {
           mergedLocks[day] = assignedDoctorId;
           changed = true;
@@ -511,15 +634,13 @@ export default function App() {
       const effectivePool = nearSafePool.length > 0 ? nearSafePool : pool;
 
       const okCertified = effectivePool.filter(
-        (doctor) => (preferences[doctor.id]?.[day] ?? 0) === 0 && (!isTueOrThu || isCertifiedDoctor(doctor)),
+        (doctor) => preferenceAt(doctor.id, day) === 0 && (!isTueOrThu || isCertifiedDoctor(doctor)),
       );
-      const okAny = effectivePool.filter((doctor) => (preferences[doctor.id]?.[day] ?? 0) === 0);
+      const okAny = effectivePool.filter((doctor) => preferenceAt(doctor.id, day) === 0);
       const nonNegativeCertified = effectivePool.filter(
-        (doctor) => (preferences[doctor.id]?.[day] ?? 0) !== 1 && (preferences[doctor.id]?.[day] ?? 0) !== 2 && (!isTueOrThu || isCertifiedDoctor(doctor)),
+        (doctor) => preferenceAt(doctor.id, day) !== 1 && (!isTueOrThu || isCertifiedDoctor(doctor)),
       );
-      const nonNegativeAny = effectivePool.filter(
-        (doctor) => (preferences[doctor.id]?.[day] ?? 0) !== 1 && (preferences[doctor.id]?.[day] ?? 0) !== 2,
-      );
+      const nonNegativeAny = effectivePool.filter((doctor) => preferenceAt(doctor.id, day) !== 1);
 
       const orderedUnique: Doctor[] = [];
       const seen = new Set<number>();
@@ -536,7 +657,7 @@ export default function App() {
     };
     const idealNames = idealReplacementNames();
 
-    const selectedPreference = preferences[selectedDoctorId]?.[day] ?? 0;
+    const selectedPreference = preferenceAt(selectedDoctorId, day);
     if (selectedPreference === 1) {
       const suggestionText =
         idealNames.length > 0
@@ -544,12 +665,10 @@ export default function App() {
           : '';
       window.alert(`${selectedDoctorName} má na den ${day} nastaveno "Nemůže", proto ho nelze zamknout.${suggestionText}`);
       return false;
-    } else if (selectedPreference === 2) {
-      messages.push(`${selectedDoctorName} má na den ${day} nastaveno "Nechce".`);
     }
 
     const conflictingWantDoctors = doctors
-      .filter((doctor) => doctor.id !== selectedDoctorId && (preferences[doctor.id]?.[day] ?? 0) === 3)
+      .filter((doctor) => doctor.id !== selectedDoctorId && preferenceAt(doctor.id, day) === 3)
       .sort((a, b) => a.order - b.order);
     if (conflictingWantDoctors.length > 0) {
       messages.push(`Na den ${day} má "Chce" ještě ${conflictingWantDoctors.map((doctor) => doctor.name).join(', ')}.`);
@@ -572,7 +691,7 @@ export default function App() {
       );
     }
 
-    if (idealNames.length > 0 && (selectedPreference === 2 || (isTueOrThu && selectedDoctor && !isCertifiedDoctor(selectedDoctor)))) {
+    if (idealNames.length > 0 && isTueOrThu && selectedDoctor && !isCertifiedDoctor(selectedDoctor)) {
       messages.push(`Ideální náhrada pro den ${day}: ${idealNames.join(', ')}.`);
     }
 
@@ -700,7 +819,7 @@ export default function App() {
     if (lockedDoctorId == null) {
       return false;
     }
-    return (preferences[lockedDoctorId]?.[day] ?? 0) === 3;
+    return preferenceAt(lockedDoctorId, day) === 3;
   };
 
   const problematicDays = useMemo(() => {
@@ -716,9 +835,9 @@ export default function App() {
         continue;
       }
       const reasons: string[] = [];
-      const pref = preferences[doctorId]?.[day] ?? 0;
-      if (pref === 2) {
-        reasons.push('lékař má na dni "Nechce"');
+      const pref = preferenceAt(doctorId, day);
+      if (pref === 1) {
+        reasons.push('lékař má na dni "Nemůže"');
       }
       const nextWeekday = (weekday(year, month, day) + 1) % 7;
       if ((AMBULANCE_WEEKDAYS_BY_DOCTOR_ID[doctorId] ?? []).includes(nextWeekday)) {
@@ -770,11 +889,12 @@ export default function App() {
     seed: primaryPlan.seed,
     finalizedAt: primaryPlan.finalizedAt,
     lastResult: result,
+    updatedAt: new Date().toISOString(),
     activePlanSlot,
     secondaryPlan: secondaryPlan,
   });
 
-  const applyPersistedState = (next: PersistedState): void => {
+  function applyPersistedState(next: PersistedState): void {
     setPrimaryPlan({
       year: next.year,
       month: next.month,
@@ -807,7 +927,7 @@ export default function App() {
     setResult(next.lastResult ?? null);
     setShowOnlyProblemDays(false);
     saveState({ ...next, lastResult: next.lastResult ?? null });
-  };
+  }
 
   const loadSavedVersion = (version: SavedScheduleVersion) => {
     const next = version.state;
@@ -1398,7 +1518,7 @@ export default function App() {
 
           <p className="mb-3 text-sm text-slate-600">
             Aktivní lékař: <span className="font-medium">{activeDoctor?.name}</span>. Kliknutím na den přepínáš stav:
-            Bez omezení → Nemůže → Nechce → Chce.
+            Bez omezení → Nemůže → Chce.
             {activeDoctor && isCertifiedDoctor(activeDoctor) ? ' (Atestovaný)' : ''}
           </p>
             <div className="grid grid-cols-7 gap-1 border border-slate-200 p-1 sm:p-2">
@@ -1418,7 +1538,7 @@ export default function App() {
                   );
                 }
                 const day = cell.day;
-                const pref = (preferences[activeDoctor.id]?.[day] ?? 0) as PreferenceValue;
+                const pref = preferenceAt(activeDoctor.id, day);
                 return (
                   <button
                     key={idx}
@@ -1432,6 +1552,22 @@ export default function App() {
                   </button>
                 );
               })}
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={saveBackupToDevice}
+                className="rounded border border-slate-300 bg-white px-3 py-1 text-sm"
+              >
+                Uložit (zařízení)
+              </button>
+              <button
+                type="button"
+                onClick={exportBackupFile}
+                className="rounded border border-slate-300 bg-white px-3 py-1 text-sm"
+              >
+                Uložit (JSON)
+              </button>
             </div>
           </section>
         )}
@@ -1845,6 +1981,22 @@ export default function App() {
                     )}
                   </div>
                 ))}
+            </div>
+            <div className="no-print mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={saveBackupToDevice}
+                className="rounded border border-slate-300 bg-white px-3 py-1 text-sm"
+              >
+                Uložit (zařízení)
+              </button>
+              <button
+                type="button"
+                onClick={exportBackupFile}
+                className="rounded border border-slate-300 bg-white px-3 py-1 text-sm"
+              >
+                Uložit (JSON)
+              </button>
             </div>
 
             <div className="mt-4">

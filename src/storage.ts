@@ -24,6 +24,7 @@ export interface PersistedState {
   };
   finalizedAt?: string;
   lastResult?: ScheduleResult | null;
+  updatedAt?: string;
 }
 
 export interface SavedScheduleVersion {
@@ -146,6 +147,7 @@ function coerceState(rawParsed: unknown, fallback: PersistedState): PersistedSta
     secondaryPlan: normalizedSecondary,
     finalizedAt: parsed.finalizedAt,
     lastResult: parsed.lastResult ?? null,
+    updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : undefined,
   };
 }
 
@@ -199,6 +201,7 @@ export function makeDefaultState(): PersistedState {
       finalizedAt: undefined,
     },
     lastResult: null,
+    updatedAt: undefined,
   };
 }
 

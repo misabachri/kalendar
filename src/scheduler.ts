@@ -70,7 +70,11 @@ function hasCrossMonthRestBlock(doctorId: number, lastDoctorId: number | null): 
 }
 
 function preferenceAt(preferences: Record<number, Record<number, PreferenceValue>>, doctorId: number, day: number): PreferenceValue {
-  return preferences[doctorId]?.[day] ?? 0;
+  const raw = preferences[doctorId]?.[day] ?? 0;
+  if (raw === 2) {
+    return 1;
+  }
+  return raw;
 }
 
 function computeWantedDoctorsByDay(input: ScheduleInput): WantedDoctorsByDay {
@@ -266,9 +270,6 @@ function scoreCandidate(
 
   if (pref === 3) {
     score -= 250;
-  }
-  if (pref === 2) {
-    score += 50;
   }
 
   if (state.assignments[day - 2] === doctor.id) {

@@ -51,8 +51,33 @@ V Xcode pak vyberte simulator nebo fyzicky iPhone a dejte `Run`.
 - React + TypeScript + Vite
 - Tailwind CSS
 - LocalStorage pro perzistenci
+- Volitelně Supabase pro automatický sync napříč zařízeními
 - Tiskové A4 CSS
 - CSV export
+
+## Cloud sync (Supabase)
+
+Pro automatické ukládání a načítání napříč zařízeními nastavte `.env`:
+
+```bash
+VITE_SUPABASE_URL=...
+VITE_SUPABASE_ANON_KEY=...
+VITE_SUPABASE_SYNC_KEY=tym-nebo-uzivatel
+# volitelné:
+# VITE_SUPABASE_SYNC_TABLE=kalendar_sync
+```
+
+V Supabase vytvořte tabulku (SQL editor):
+
+```sql
+create table if not exists public.kalendar_sync (
+  sync_key text primary key,
+  payload jsonb not null,
+  updated_at timestamptz not null default now()
+);
+```
+
+Poznámka: `VITE_SUPABASE_SYNC_KEY` musí být stejný na všech zařízeních, která mají sdílet stejný kalendář.
 
 ## Logika omezení
 
@@ -78,7 +103,7 @@ V Xcode pak vyberte simulator nebo fyzicky iPhone a dejte `Run`.
 
 ### Soft constraints (priorita)
 
-1. `Chce` se bere jako tvrdý požadavek dne: pokud je na dni alespoň jedno `Chce`, službu musí dostat lékař s nejvyšší prioritou podle pořadí (nejnižší číslo). `Nechce` je penalizace.
+1. `Chce` se bere jako tvrdý požadavek dne: pokud je na dni alespoň jedno `Chce`, službu musí dostat lékař s nejvyšší prioritou podle pořadí (nejnižší číslo). `Nemůže` je tvrdý zákaz.
    Pokud má lékař více dní `Chce` než svůj požadovaný počet služeb, vynucení `Chce` se u něj uplatní jen do výše cíle; další `Chce` jsou už jen preference.
 2. Hlavní preference je držet požadované počty služeb u jednotlivých lékařů.
 3. Penalizace vzoru obden (D a D+2 stejný lékař) v rámci povoleného maxima.
@@ -105,4 +130,5 @@ Pokud nelze plán sestavit ani ve fallback režimu, aplikace zobrazí konfliktn�
 
 ## Poznámka k perzistenci
 
-Celý formulář (měsíc/rok, jména, limity, cílové počty, preference, zámky, poslední 2 dny minulého měsíce, seed) se ukládá do `localStorage`.
+Celý formulář (měsíc/rok, jména, limity, cílové počty, preference, zámky, poslední 2 dny minulého měsíce, seed) i poslední rozpis se ukládá do `localStorage`.
+Při zapnutém Supabase sync se stejný stav ukládá i do cloudu.
