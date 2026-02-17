@@ -7,7 +7,7 @@ import type {
   ScheduleStats,
 } from './types';
 import { AMBULANCE_WEEKDAYS_BY_DOCTOR_ID } from './constants';
-import { daysInMonth, isFriday, isWeekendServiceDay, weekday } from './utils/date';
+import { daysInMonth, isWeekendServiceDay, weekday } from './utils/date';
 
 interface SolveState {
   assignments: Record<number, number>;
@@ -118,6 +118,16 @@ function lockedDoctor(locks: Record<number, number | null>, day: number): number
   return locks[day] ?? null;
 }
 
+function hasCertifiedOverrideLock(day: number, doctor: Doctor, input: ScheduleInput): boolean {
+  const forced = lockedDoctor(input.locks, day);
+  return forced === doctor.id && isTuesdayOrThursday(input.year, input.month, day) && !isCertifiedDoctor(doctor);
+}
+
+function hasPreferenceOverrideLock(day: number, doctor: Doctor, input: ScheduleInput): boolean {
+  const forced = lockedDoctor(input.locks, day);
+  return forced === doctor.id && preferenceAt(input.preferences, doctor.id, day) === 1;
+}
+
 function isHardAllowed(
   day: number,
   doctor: Doctor,
@@ -139,7 +149,7 @@ function isHardAllowed(
   }
 
   const pref = preferenceAt(input.preferences, doctor.id, day);
-  if (pref === 1) {
+  if (pref === 1 && !hasPreferenceOverrideLock(day, doctor, input)) {
     return false;
   }
 
@@ -151,7 +161,11 @@ function isHardAllowed(
     return false;
   }
 
-  if (isTuesdayOrThursday(input.year, input.month, day) && !isCertifiedDoctor(doctor)) {
+  if (
+    isTuesdayOrThursday(input.year, input.month, day) &&
+    !isCertifiedDoctor(doctor) &&
+    !hasCertifiedOverrideLock(day, doctor, input)
+  ) {
     return false;
   }
 
@@ -194,7 +208,7 @@ function isBaseHardAllowedForDiscussion(
   }
 
   const pref = preferenceAt(input.preferences, doctor.id, day);
-  if (pref === 1) {
+  if (pref === 1 && !hasPreferenceOverrideLock(day, doctor, input)) {
     return false;
   }
 
@@ -206,7 +220,11 @@ function isBaseHardAllowedForDiscussion(
     return false;
   }
 
-  if (isTuesdayOrThursday(input.year, input.month, day) && !isCertifiedDoctor(doctor)) {
+  if (
+    isTuesdayOrThursday(input.year, input.month, day) &&
+    !isCertifiedDoctor(doctor) &&
+    !hasCertifiedOverrideLock(day, doctor, input)
+  ) {
     return false;
   }
 
@@ -256,11 +274,11 @@ function scoreCandidate(
   const nextCount = (state.counts[doctor.id] ?? 0) + 1;
   score += Math.abs(nextCount - targets[doctor.id]) * 12;
 
-  // Soft preference: avoid assigning a doctor the day before their ambulance day.
+  // Very soft preference: day-before-ambulance can be used when needed.
   const clinicWeekdays = AMBULANCE_WEEKDAYS_BY_DOCTOR_ID[doctor.id] ?? [];
   const nextWeekday = (weekday(input.year, input.month, day) + 1) % 7;
   if (clinicWeekdays.includes(nextWeekday)) {
-    score += 18;
+    score += 6;
   }
 
   return score;
@@ -306,13 +324,17 @@ function validateLocks(
       );
     }
 
-    if (preferenceAt(input.preferences, docId, day) === 1) {
+    if (preferenceAt(input.preferences, docId, day) === 1 && lockedDoctor(input.locks, day) !== docId) {
       issues.push(`Den ${day}: zamčení je v konfliktu s "Nemůže" (${doctor.name}).`);
     }
     if (isLeadershipDoctor(doctor) && isWeekendServiceDay(input.year, input.month, day)) {
       issues.push(`Den ${day}: ${doctor.name} nemůže sloužit Pá/So/Ne.`);
     }
-    if (isTuesdayOrThursday(input.year, input.month, day) && !isCertifiedDoctor(doctor)) {
+    if (
+      isTuesdayOrThursday(input.year, input.month, day) &&
+      !isCertifiedDoctor(doctor) &&
+      !hasCertifiedOverrideLock(day, doctor, input)
+    ) {
       issues.push(`Den ${day}: ${doctor.name} není atestovaný, úterky a čtvrtky musí krýt atestovaní (#1–#5).`);
     }
     if (day === 1 && hasCrossMonthRestBlock(docId, input.previousMonthLastTwo.lastDoctorId)) {
@@ -375,6 +397,47 @@ function strictTargetFeasible(
   return needTotal <= remainingDays;
 }
 
+function minimumRequiredByDoctor(
+  doctors: Doctor[],
+  targets: Record<number, number>,
+  caps: Record<number, number>,
+  totalDays: number,
+): Record<number, number> {
+  const baseRequired = doctors
+    .filter((doctor) => (targets[doctor.id] ?? 0) > 0 && (caps[doctor.id] ?? 0) > 0)
+    .sort((a, b) => (targets[b.id] ?? 0) - (targets[a.id] ?? 0) || a.order - b.order);
+
+  const required: Record<number, number> = Object.fromEntries(doctors.map((doctor) => [doctor.id, 0]));
+  for (let i = 0; i < Math.min(totalDays, baseRequired.length); i += 1) {
+    required[baseRequired[i].id] = 1;
+  }
+  return required;
+}
+
+function minimumTargetFeasible(
+  doctors: Doctor[],
+  state: SolveState,
+  minimumRequired: Record<number, number>,
+  caps: Record<number, number>,
+  totalDays: number,
+): boolean {
+  const assigned = Object.keys(state.assignments).length;
+  const remainingDays = totalDays - assigned;
+
+  let needTotal = 0;
+  for (const doctor of doctors) {
+    const current = state.counts[doctor.id] ?? 0;
+    const need = Math.max(0, (minimumRequired[doctor.id] ?? 0) - current);
+    needTotal += need;
+    const maxPossibleForDoctor = Math.min(caps[doctor.id] ?? 0, current + remainingDays);
+    if (maxPossibleForDoctor < (minimumRequired[doctor.id] ?? 0)) {
+      return false;
+    }
+  }
+
+  return needTotal <= remainingDays;
+}
+
 function createInitialState(doctors: Doctor[]): SolveState {
   return {
     assignments: {},
@@ -404,6 +467,7 @@ function solveWithCaps(
   input: ScheduleInput,
   caps: Record<number, number>,
   targets: Record<number, number>,
+  minimumRequired: Record<number, number>,
   wantedDoctorsByDay: WantedDoctorsByDay,
   rng: () => number,
   strictTargets: boolean,
@@ -424,9 +488,13 @@ function solveWithCaps(
   const backtrack = (): boolean => {
     if (Object.keys(state.assignments).length === days) {
       if (!strictTargets) {
-        return true;
+        return input.doctors.every((doctor) => (state.counts[doctor.id] ?? 0) >= (minimumRequired[doctor.id] ?? 0));
       }
-      return input.doctors.every((doctor) => (state.counts[doctor.id] ?? 0) === (targets[doctor.id] ?? 0));
+      return input.doctors.every(
+        (doctor) =>
+          (state.counts[doctor.id] ?? 0) === (targets[doctor.id] ?? 0) &&
+          (state.counts[doctor.id] ?? 0) >= (minimumRequired[doctor.id] ?? 0),
+      );
     }
 
     let targetDay = -1;
@@ -487,6 +555,9 @@ function solveWithCaps(
       if (forwardOk && strictTargets && !strictTargetFeasible(input.doctors, state, targets, days)) {
         forwardOk = false;
       }
+      if (forwardOk && !minimumTargetFeasible(input.doctors, state, minimumRequired, caps, days)) {
+        forwardOk = false;
+      }
 
       if (forwardOk && backtrack()) {
         return true;
@@ -520,6 +591,7 @@ function buildPartialProposal(
   input: ScheduleInput,
   caps: Record<number, number>,
   targets: Record<number, number>,
+  minimumRequired: Record<number, number>,
   wantedDoctorsByDay: WantedDoctorsByDay,
   rng: () => number,
 ): {
@@ -530,6 +602,9 @@ function buildPartialProposal(
   const state = createInitialState(input.doctors);
   const assignments: Record<number, number | null> = {};
   const unassignedDays: Array<{ day: number; candidateDoctorIds: number[] }> = [];
+
+  const canLeadershipTakeMore = (doctor: Doctor): boolean =>
+    !isLeadershipDoctor(doctor) || (state.counts[doctor.id] ?? 0) < (caps[doctor.id] ?? 0);
 
   for (let day = 1; day <= days; day += 1) {
     const candidates = input.doctors.filter((doctor) =>
@@ -548,15 +623,49 @@ function buildPartialProposal(
         applyAssignment(state, input.year, input.month, day, selectedDoctorId);
         unassignedDays.push({ day, candidateDoctorIds: discussionCandidates });
       } else {
-        assignments[day] = null;
-        unassignedDays.push({ day, candidateDoctorIds: discussionCandidates });
+        const forcedDoctorId = lockedDoctor(input.locks, day);
+        const emergencyDoctors = (forcedDoctorId !== null
+          ? input.doctors.filter((doctor) => doctor.id === forcedDoctorId)
+          : [...input.doctors].sort((a, b) => a.order - b.order));
+
+        // Relaxation ladder: prefer OK/allowed doctors, but always produce a schedule.
+        const preferredNonCannot = emergencyDoctors.filter(
+          (doctor) => preferenceAt(input.preferences, doctor.id, day) !== 1 && canLeadershipTakeMore(doctor),
+        );
+        const anyNonCannot = emergencyDoctors.filter((doctor) => preferenceAt(input.preferences, doctor.id, day) !== 1);
+        const anyAllowedByLeadershipCap = emergencyDoctors.filter((doctor) => canLeadershipTakeMore(doctor));
+        const absolutelyAny = emergencyDoctors;
+
+        const emergencyCandidates = (
+          preferredNonCannot.length > 0
+            ? preferredNonCannot
+            : anyNonCannot.length > 0
+              ? anyNonCannot
+              : anyAllowedByLeadershipCap.length > 0
+                ? anyAllowedByLeadershipCap
+                : absolutelyAny
+        ).map((doctor) => doctor.id);
+        const selectedDoctorId = emergencyCandidates[0] ?? null;
+        if (selectedDoctorId !== null) {
+          assignments[day] = selectedDoctorId;
+          applyAssignment(state, input.year, input.month, day, selectedDoctorId);
+        } else {
+          assignments[day] = null;
+        }
+        unassignedDays.push({ day, candidateDoctorIds: emergencyCandidates });
       }
       continue;
     }
 
     candidates.sort((a, b) => {
-      const as = scoreCandidate(day, a, state, input, targets) + rng() * 0.001;
-      const bs = scoreCandidate(day, b, state, input, targets) + rng() * 0.001;
+      let as = scoreCandidate(day, a, state, input, targets) + rng() * 0.001;
+      let bs = scoreCandidate(day, b, state, input, targets) + rng() * 0.001;
+      if ((state.counts[a.id] ?? 0) < (minimumRequired[a.id] ?? 0)) {
+        as -= 180;
+      }
+      if ((state.counts[b.id] ?? 0) < (minimumRequired[b.id] ?? 0)) {
+        bs -= 180;
+      }
       if (as !== bs) {
         return as - bs;
       }
@@ -592,24 +701,9 @@ function buildStats(
     }
   }
 
-  let friSunPairings = 0;
-  const days = daysInMonth(year, month);
-  for (let day = 1; day <= days - 2; day += 1) {
-    if (!isFriday(year, month, day)) {
-      continue;
-    }
-    const fri = assignments[day];
-    const sat = assignments[day + 1];
-    const sun = assignments[day + 2];
-    if (fri && sun && fri === sun && sat && sat !== fri) {
-      friSunPairings += 1;
-    }
-  }
-
   return {
     totalByDoctor,
     weekendByDoctor,
-    friSunPairings,
   };
 }
 
@@ -620,19 +714,11 @@ function emptyRelaxationSummary(): RelaxationInfo[] {
 export function generateSchedule(input: ScheduleInput): ScheduleResult {
   const caps = initialCaps(input.doctors, input.maxShiftsByDoctor);
   const targets = sanitizeTargets(input);
+  const minimumRequired = minimumRequiredByDoctor(input.doctors, targets, caps, daysInMonth(input.year, input.month));
   const wantedDoctorsByDay = computeWantedDoctorsByDay(input);
   const rng = makeRng(input.seed);
 
-  const lockIssues = validateLocks(input, caps, targets, wantedDoctorsByDay);
-  if (lockIssues.length > 0) {
-    return {
-      ok: false,
-      conflicts: lockIssues,
-      relaxationsAttempted: [],
-    };
-  }
-
-  const strictAttempt = solveWithCaps(input, caps, targets, wantedDoctorsByDay, rng, true);
+  const strictAttempt = solveWithCaps(input, caps, targets, minimumRequired, wantedDoctorsByDay, rng, true);
   if (strictAttempt.ok) {
     return {
       ok: true,
@@ -643,7 +729,7 @@ export function generateSchedule(input: ScheduleInput): ScheduleResult {
     };
   }
 
-  const fallbackAttempt = solveWithCaps(input, caps, targets, wantedDoctorsByDay, rng, false);
+  const fallbackAttempt = solveWithCaps(input, caps, targets, minimumRequired, wantedDoctorsByDay, rng, false);
   if (fallbackAttempt.ok) {
     return {
       ok: true,
@@ -654,7 +740,7 @@ export function generateSchedule(input: ScheduleInput): ScheduleResult {
     };
   }
 
-  const partialProposal = buildPartialProposal(input, caps, targets, wantedDoctorsByDay, rng);
+  const partialProposal = buildPartialProposal(input, caps, targets, minimumRequired, wantedDoctorsByDay, rng);
   const hasUnassignedDay = Object.values(partialProposal.assignments).some((doctorId) => doctorId === null);
   if (!hasUnassignedDay) {
     const assignments = Object.fromEntries(

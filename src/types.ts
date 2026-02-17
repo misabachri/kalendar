@@ -29,7 +29,6 @@ export interface ScheduleInput {
 export interface ScheduleStats {
   totalByDoctor: Record<number, number>;
   weekendByDoctor: Record<number, number>;
-  friSunPairings: number;
 }
 
 export interface RelaxationInfo {
