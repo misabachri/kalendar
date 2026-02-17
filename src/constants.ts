@@ -5,7 +5,7 @@ export const BACKUP_STORAGE_KEY = 'kalendar-sluzeb-v1-backup';
 
 export const DEFAULT_DOCTORS: Doctor[] = [
   { id: 1, order: 1, name: 'Primář', role: 'primar' },
-  { id: 2, order: 2, name: 'Zástupce', role: 'zastupce' },
+  { id: 2, order: 2, name: 'Fero (zástupce)', role: 'zastupce' },
   { id: 3, order: 3, name: 'Lékař 3', role: 'regular' },
   { id: 4, order: 4, name: 'Lékař 4', role: 'regular' },
   { id: 5, order: 5, name: 'Lékař 5', role: 'regular' },

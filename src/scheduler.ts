@@ -25,6 +25,15 @@ function isPoolDoctor(doctor: Doctor): boolean {
   return doctor.role === 'regular';
 }
 
+function isCertifiedDoctor(doctor: Doctor): boolean {
+  return doctor.order <= 5;
+}
+
+function isTuesdayOrThursday(year: number, month: number, day: number): boolean {
+  const wd = weekday(year, month, day);
+  return wd === 2 || wd === 4;
+}
+
 function makeRng(seed?: string): () => number {
   if (!seed) {
     return () => 0.5;
@@ -127,6 +136,10 @@ function isHardAllowed(
   }
 
   if (isLeadershipDoctor(doctor) && isWeekendServiceDay(input.year, input.month, day)) {
+    return false;
+  }
+
+  if (isTuesdayOrThursday(input.year, input.month, day) && !isCertifiedDoctor(doctor)) {
     return false;
   }
 
@@ -272,6 +285,9 @@ function validateLocks(input: ScheduleInput, caps: Record<number, number>, force
     }
     if (isLeadershipDoctor(doctor) && isWeekendServiceDay(input.year, input.month, day)) {
       issues.push(`Den ${day}: ${doctor.name} nemůže sloužit Pá/So/Ne.`);
+    }
+    if (isTuesdayOrThursday(input.year, input.month, day) && !isCertifiedDoctor(doctor)) {
+      issues.push(`Den ${day}: ${doctor.name} není atestovaný, úterky a čtvrtky musí krýt atestovaní (#1–#5).`);
     }
     if (day === 1 && hasCrossMonthRestBlock(docId, input.previousMonthLastTwo.lastDoctorId)) {
       issues.push(`Den 1: ${doctor.name} má odpočinek po službě z minulého měsíce.`);

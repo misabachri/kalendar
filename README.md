@@ -70,6 +70,7 @@ V Xcode pak vyberte simulator nebo fyzicky iPhone a dejte `Run`.
 7. U každého běžného lékaře lze zadat maximální počet služeb za měsíc.
 8. U každého lékaře lze zadat požadovaný počet služeb; solver je nejdřív zkusí splnit přesně.
 9. Víkendový blok `Pá–Ne` se počítá jako jeden celek; každý lékař může mít maximálně 2 takové bloky za měsíc.
+10. Atestovaní lékaři jsou #1–#5 a musí pokrýt všechny úterky a čtvrtky.
 
 ### Cíle a fallback
 

@@ -47,6 +47,13 @@ function coerceState(rawParsed: unknown, fallback: PersistedState): PersistedSta
     doctors = [...parsedDoctors, fallback.doctors[9]];
   }
 
+  doctors = doctors.map((doctor) => {
+    if (doctor.id === 2 && doctor.role === 'zastupce' && doctor.name.trim() === 'Zástupce') {
+      return { ...doctor, name: 'Fero (zástupce)' };
+    }
+    return doctor;
+  });
+
   const maxShiftsByDoctor = {
     ...defaultMaxByDoctor(doctors),
     ...(parsed.customMaxByDoctor ?? {}),

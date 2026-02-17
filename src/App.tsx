@@ -37,6 +37,10 @@ function roleLabel(role: Doctor['role']): string {
   return 'Běžný';
 }
 
+function isCertifiedDoctor(doctor: Doctor): boolean {
+  return doctor.order <= 5;
+}
+
 function cyclePref(current: PreferenceValue): PreferenceValue {
   if (current === 3) {
     return 0;
@@ -329,11 +333,14 @@ export default function App() {
           <h2 className="mb-3 text-lg font-semibold">2) Lékaři (fixní pořadí #1–#10)</h2>
           <div className="mb-3 rounded border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
             Limity: Primář má pevně max 1, Zástupce pevně max 2, ostatním nastavíš max ručně.
-            U každého lékaře lze navíc zadat požadovaný počet služeb.
+            U každého lékaře lze navíc zadat požadovaný počet služeb. Atestovaní jsou #1–#5 a musí krýt úterky a čtvrtky.
           </div>
           <div className="grid gap-2 md:grid-cols-2">
             {doctors.map((doctor) => (
-              <div key={doctor.id} className="rounded border border-slate-200 p-2">
+              <div
+                key={doctor.id}
+                className={`rounded border p-2 ${isCertifiedDoctor(doctor) ? 'border-emerald-300 bg-emerald-50/40' : 'border-slate-200'}`}
+              >
                 <div className="mb-2 flex items-center gap-2">
                   <span className="w-10 text-sm text-slate-600">#{doctor.order}</span>
                   <input
@@ -343,6 +350,11 @@ export default function App() {
                     className="flex-1 rounded border border-slate-300 px-2 py-1"
                   />
                   <span className="text-xs uppercase text-slate-500">{roleLabel(doctor.role)}</span>
+                  {isCertifiedDoctor(doctor) && (
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-emerald-800">
+                      Atestovaný
+                    </span>
+                  )}
                 </div>
                 <label className="mb-2 flex flex-wrap items-center gap-2 text-sm">
                   <span>Max služeb/měsíc</span>
@@ -467,7 +479,9 @@ export default function App() {
                 className={`rounded-full border px-3 py-1 text-sm ${
                   activeDoctor?.id === doctor.id
                     ? 'border-slate-900 bg-slate-900 text-white'
-                    : 'border-slate-300 bg-white text-slate-800'
+                    : isCertifiedDoctor(doctor)
+                      ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                      : 'border-slate-300 bg-white text-slate-800'
                 }`}
               >
                 #{doctor.order} {doctor.name}
@@ -488,6 +502,7 @@ export default function App() {
           <p className="mb-3 text-sm text-slate-600">
             Aktivní lékař: <span className="font-medium">{activeDoctor?.name}</span>. Kliknutím na den přepínáš stav:
             Bez omezení → Nemůže → Nechce → Chce.
+            {activeDoctor && isCertifiedDoctor(activeDoctor) ? ' (Atestovaný)' : ''}
           </p>
 
           <div className="grid grid-cols-7 gap-1 border border-slate-200 p-1 sm:p-2">
@@ -604,35 +619,40 @@ export default function App() {
         {result && result.ok && (
           <>
             <div className="space-y-2 sm:hidden">
-              {Array.from({ length: dayCount }, (_, idx) => idx + 1).map((day) => (
-                <div
-                  key={day}
-                  className={`rounded border p-3 ${weekdayShortForDay(day) === 'So' || weekdayShortForDay(day) === 'Ne' ? 'border-slate-300 bg-slate-50' : 'border-slate-200 bg-white'}`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="text-sm font-semibold text-slate-700">
-                      {weekdayShortForDay(day)} {day}.
-                    </div>
-                    {locks[day] != null && (
-                      <div className="text-xs font-medium text-blue-700">
-                        Zamčeno
+              {Array.from({ length: dayCount }, (_, idx) => idx + 1).map((day) => {
+                const assignedDoctor = doctors.find((d) => d.id === result.assignments[day]);
+                const isCertified = assignedDoctor ? isCertifiedDoctor(assignedDoctor) : false;
+                return (
+                  <div
+                    key={day}
+                    className={`rounded border p-3 ${weekdayShortForDay(day) === 'So' || weekdayShortForDay(day) === 'Ne' ? 'border-slate-300 bg-slate-50' : 'border-slate-200 bg-white'}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-sm font-semibold text-slate-700">
+                        {weekdayShortForDay(day)} {day}.
                       </div>
-                    )}
+                      {locks[day] != null && <div className="text-xs font-medium text-blue-700">Zamčeno</div>}
+                    </div>
+                    <div className="mt-1 flex items-center gap-2">
+                      <span className="text-base font-medium">{assignedDoctor?.name ?? '—'}</span>
+                      {isCertified && (
+                        <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-emerald-800">
+                          Atestovaný
+                        </span>
+                      )}
+                    </div>
+                    <div className="no-print mt-2">
+                      <button
+                        type="button"
+                        onClick={() => toggleLockFromResult(day)}
+                        className="rounded border border-slate-300 px-2 py-1 text-xs"
+                      >
+                        {locks[day] === result.assignments[day] ? 'Odemknout' : 'Zamknout'}
+                      </button>
+                    </div>
                   </div>
-                  <div className="mt-1 text-base font-medium">
-                    {doctors.find((d) => d.id === result.assignments[day])?.name ?? '—'}
-                  </div>
-                  <div className="no-print mt-2">
-                    <button
-                      type="button"
-                      onClick={() => toggleLockFromResult(day)}
-                      className="rounded border border-slate-300 px-2 py-1 text-xs"
-                    >
-                      {locks[day] === result.assignments[day] ? 'Odemknout' : 'Zamknout'}
-                    </button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
 
             <div className="hidden grid-cols-7 gap-1 border border-slate-200 p-1 text-xs sm:grid sm:p-2 sm:text-sm">
@@ -671,15 +691,29 @@ export default function App() {
 
             <div className="mt-4">
               <h3 className="mb-2 text-lg font-semibold">Statistiky</h3>
-              <ul className="space-y-1 text-sm">
-                {doctors.map((doctor) => (
-                  <li key={doctor.id}>
-                    {doctor.name}: služeb {result.stats.totalByDoctor[doctor.id] ?? 0} / cíl{' '}
-                    {targetShiftsByDoctor[doctor.id] ?? 0}, víkendy {result.stats.weekendByDoctor[doctor.id] ?? 0}
-                  </li>
-                ))}
-                <li className="pt-1 font-medium">Pá+Ne párování: {result.stats.friSunPairings}</li>
-              </ul>
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {doctors.map((doctor) => {
+                  const actual = result.stats.totalByDoctor[doctor.id] ?? 0;
+                  const target = targetShiftsByDoctor[doctor.id] ?? 0;
+                  const weekend = result.stats.weekendByDoctor[doctor.id] ?? 0;
+                  const diff = actual - target;
+                  const diffText = diff === 0 ? '0' : diff > 0 ? `+${diff}` : String(diff);
+                  const diffClass =
+                    diff === 0 ? 'text-emerald-700 bg-emerald-50' : diff > 0 ? 'text-amber-700 bg-amber-50' : 'text-rose-700 bg-rose-50';
+                  return (
+                    <div key={doctor.id} className="rounded border border-slate-200 bg-slate-50 p-3 text-sm">
+                      <div className="font-semibold text-slate-800">{doctor.name}</div>
+                      <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                        <span className="rounded bg-slate-100 px-2 py-1 text-slate-700">Požadováno: {target}</span>
+                        <span className="rounded bg-slate-100 px-2 py-1 text-slate-700">Reálně: {actual}</span>
+                        <span className={`rounded px-2 py-1 ${diffClass}`}>Rozdíl: {diffText}</span>
+                        <span className="rounded bg-slate-100 px-2 py-1 text-slate-700">Víkendy: {weekend}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="mt-3 text-sm font-medium">Pá+Ne párování: {result.stats.friSunPairings}</p>
 
               <p className="mt-4 text-xs text-slate-500">
                 Vygenerováno: {new Date().toLocaleString('cs-CZ')}
