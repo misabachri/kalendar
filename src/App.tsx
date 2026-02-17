@@ -125,42 +125,6 @@ export default function App() {
     setDoctors((prev) => prev.map((d) => (d.id === id ? { ...d, name } : d)));
   };
 
-  const updateMaxShifts = (doctorId: number, value: string) => {
-    const parsed = Number(value);
-    const safe = Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
-    setMaxShiftsByDoctor((prev) => ({ ...prev, [doctorId]: safe }));
-    setTargetShiftsByDoctor((prev) => ({
-      ...prev,
-      [doctorId]: Math.min(Math.max(0, prev[doctorId] ?? safe), safe),
-    }));
-  };
-
-  const updateTargetShifts = (doctorId: number, value: string) => {
-    const parsed = Number(value);
-    const safe = Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
-    const doctor = doctors.find((d) => d.id === doctorId);
-    const maxForDoctor =
-      doctor?.role === 'primar'
-        ? 1
-        : doctor?.role === 'zastupce'
-          ? 2
-          : Math.max(0, Math.floor(maxShiftsByDoctor[doctorId] ?? 5));
-    setTargetShiftsByDoctor((prev) => ({ ...prev, [doctorId]: Math.min(safe, maxForDoctor) }));
-  };
-
-  const adjustMaxShifts = (doctorId: number, delta: number) => {
-    const doctor = doctors.find((d) => d.id === doctorId);
-    const current = doctor?.role === 'primar' ? 1 : doctor?.role === 'zastupce' ? 2 : (maxShiftsByDoctor[doctorId] ?? 5);
-    const next = Math.max(0, current + delta);
-    updateMaxShifts(doctorId, String(next));
-  };
-
-  const adjustTargetShifts = (doctorId: number, delta: number) => {
-    const current = targetShiftsByDoctor[doctorId] ?? 0;
-    const next = Math.max(0, current + delta);
-    updateTargetShifts(doctorId, String(next));
-  };
-
   const setPref = (doctorId: number, day: number) => {
     setPreferences((prev) => {
       const current = (prev[doctorId]?.[day] ?? 0) as PreferenceValue;
@@ -286,7 +250,7 @@ export default function App() {
   };
 
   return (
-    <div className="mx-auto max-w-[1200px] px-3 py-4 text-slate-900 sm:px-4 sm:py-6">
+    <div className="mx-auto max-w-[1200px] overflow-x-hidden px-3 py-4 text-slate-900 sm:px-4 sm:py-6">
       <h1 className="mb-4 text-xl font-bold sm:text-2xl">Měsíční přehled sloužících lékařů</h1>
 
       <div className="no-print space-y-6">
@@ -332,23 +296,16 @@ export default function App() {
         <section className="rounded-lg bg-white p-4 shadow-sm">
           <h2 className="mb-3 text-lg font-semibold">2) Lékaři (fixní pořadí #1–#10)</h2>
           <div className="mb-3 rounded border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
-            Limity: Primář má pevně max 1, Zástupce pevně max 2, ostatním nastavíš max ručně.
-            U každého lékaře lze navíc zadat požadovaný počet služeb. Atestovaní jsou #1–#5 a musí krýt úterky a čtvrtky.
+            Atestovaní jsou #1–#5 a musí krýt úterky a čtvrtky.
           </div>
           <div className="grid gap-2 md:grid-cols-2">
             {doctors.map((doctor) => (
               <div
                 key={doctor.id}
-                className={`rounded border p-2 ${isCertifiedDoctor(doctor) ? 'border-emerald-300 bg-emerald-50/40' : 'border-slate-200'}`}
+                className={`min-w-0 rounded border p-2 ${isCertifiedDoctor(doctor) ? 'border-emerald-300 bg-emerald-50/40' : 'border-slate-200'}`}
               >
-                <div className="mb-2 flex items-center gap-2">
+                <div className="mb-2 flex flex-wrap items-center gap-2">
                   <span className="w-10 text-sm text-slate-600">#{doctor.order}</span>
-                  <input
-                    type="text"
-                    value={doctor.name}
-                    onChange={(e) => updateDoctorName(doctor.id, e.target.value)}
-                    className="flex-1 rounded border border-slate-300 px-2 py-1"
-                  />
                   <span className="text-xs uppercase text-slate-500">{roleLabel(doctor.role)}</span>
                   {isCertifiedDoctor(doctor) && (
                     <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-emerald-800">
@@ -356,65 +313,12 @@ export default function App() {
                     </span>
                   )}
                 </div>
-                <label className="mb-2 flex flex-wrap items-center gap-2 text-sm">
-                  <span>Max služeb/měsíc</span>
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => adjustMaxShifts(doctor.id, -1)}
-                      disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
-                      className="rounded border border-slate-300 px-2 py-1 leading-none disabled:bg-slate-100 disabled:text-slate-500"
-                      aria-label={`Snížit max služeb pro ${doctor.name}`}
-                    >
-                      -
-                    </button>
-                    <input
-                      type="number"
-                      min={0}
-                      value={doctor.role === 'primar' ? 1 : doctor.role === 'zastupce' ? 2 : (maxShiftsByDoctor[doctor.id] ?? 5)}
-                      onChange={(e) => updateMaxShifts(doctor.id, e.target.value)}
-                      disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
-                      className="w-20 rounded border border-slate-300 px-2 py-1 text-center disabled:bg-slate-100 disabled:text-slate-500"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => adjustMaxShifts(doctor.id, 1)}
-                      disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
-                      className="rounded border border-slate-300 px-2 py-1 leading-none disabled:bg-slate-100 disabled:text-slate-500"
-                      aria-label={`Zvýšit max služeb pro ${doctor.name}`}
-                    >
-                      +
-                    </button>
-                  </div>
-                </label>
-                <label className="flex flex-wrap items-center gap-2 text-sm">
-                  <span>Požadovaný počet služeb</span>
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => adjustTargetShifts(doctor.id, -1)}
-                      className="rounded border border-slate-300 px-2 py-1 leading-none"
-                      aria-label={`Snížit požadovaný počet služeb pro ${doctor.name}`}
-                    >
-                      -
-                    </button>
-                    <input
-                      type="number"
-                      min={0}
-                      value={targetShiftsByDoctor[doctor.id] ?? 0}
-                      onChange={(e) => updateTargetShifts(doctor.id, e.target.value)}
-                      className="w-20 rounded border border-slate-300 px-2 py-1 text-center"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => adjustTargetShifts(doctor.id, 1)}
-                      className="rounded border border-slate-300 px-2 py-1 leading-none"
-                      aria-label={`Zvýšit požadovaný počet služeb pro ${doctor.name}`}
-                    >
-                      +
-                    </button>
-                  </div>
-                </label>
+                <input
+                  type="text"
+                  value={doctor.name}
+                  onChange={(e) => updateDoctorName(doctor.id, e.target.value)}
+                  className="w-full min-w-0 rounded border border-slate-300 px-2 py-1"
+                />
               </div>
             ))}
           </div>
