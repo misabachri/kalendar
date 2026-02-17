@@ -111,6 +111,7 @@ export default function App() {
   const [result, setResult] = useState<ScheduleResult | null>(null);
   const [activeDoctorId, setActiveDoctorId] = useState(initial.doctors[0]?.id ?? 1);
   const [backupNotice, setBackupNotice] = useState<string | null>(null);
+  const [debateSelectionByDay, setDebateSelectionByDay] = useState<Record<number, number>>({});
   const backupFileInputRef = useRef<HTMLInputElement>(null);
 
   const dayCount = useMemo(() => daysInMonth(year, month), [year, month]);
@@ -191,7 +192,7 @@ export default function App() {
     });
   };
 
-  const runGeneration = () => {
+  const runGenerationWithLocks = (nextLocks: Record<number, number | null>) => {
     const next = generateSchedule({
       year,
       month,
@@ -199,11 +200,15 @@ export default function App() {
       maxShiftsByDoctor,
       targetShiftsByDoctor,
       preferences,
-      locks,
+      locks: nextLocks,
       previousMonthLastTwo,
       seed: seed.trim() || undefined,
     });
     setResult(next);
+  };
+
+  const runGeneration = () => {
+    runGenerationWithLocks(locks);
   };
 
   const exportCsv = () => {
@@ -229,10 +234,14 @@ export default function App() {
       return;
     }
     const assignedDoctorId = result.assignments[day];
-    setLocks((prev) => ({
-      ...prev,
-      [day]: prev[day] === assignedDoctorId ? null : assignedDoctorId,
-    }));
+    setLocks((prev) => {
+      const nextLocks = {
+        ...prev,
+        [day]: prev[day] === assignedDoctorId ? null : assignedDoctorId,
+      };
+      runGenerationWithLocks(nextLocks);
+      return nextLocks;
+    });
   };
 
   const weekdayShortForDay = (day: number): string => WEEKDAY_SHORT[weekdayMondayIndex(year, month, day)];
@@ -367,6 +376,34 @@ export default function App() {
     applyPersistedState(parsed);
     saveBackupState(parsed);
     setBackupNotice('Záloha ze souboru byla načtena.');
+  };
+
+  useEffect(() => {
+    if (!result || result.ok || !result.partialProposal) {
+      setDebateSelectionByDay({});
+      return;
+    }
+
+    const nextSelection: Record<number, number> = {};
+    for (const entry of result.partialProposal.unassignedDays) {
+      if (entry.candidateDoctorIds.length > 0) {
+        nextSelection[entry.day] = entry.candidateDoctorIds[0];
+      }
+    }
+    setDebateSelectionByDay(nextSelection);
+  }, [result]);
+
+  const applyDebateChoiceAndRecalculate = (day: number) => {
+    const selectedDoctorId = debateSelectionByDay[day];
+    if (!selectedDoctorId) {
+      return;
+    }
+    const nextLocks = {
+      ...locks,
+      [day]: selectedDoctorId,
+    };
+    setLocks(nextLocks);
+    runGenerationWithLocks(nextLocks);
   };
 
   return (
@@ -708,11 +745,43 @@ export default function App() {
                       .map((id) => doctors.find((doctor) => doctor.id === id)?.name)
                       .filter((name): name is string => Boolean(name));
                     return (
-                      <li key={entry.day}>
-                        Den {entry.day} zůstal neobsazený.
-                        {candidateNames.length > 0
-                          ? ` Možní kandidáti k debatě: ${candidateNames.join(', ')}.`
-                          : ' Pro tento den teď není kandidát, který by splnil pravidla.'}
+                      <li key={entry.day} className="rounded border border-amber-300 bg-white p-2">
+                        <div>
+                          Den {entry.day} zůstal neobsazený.
+                          {candidateNames.length > 0
+                            ? ` Možní kandidáti k debatě: ${candidateNames.join(', ')}.`
+                            : ' Pro tento den teď není kandidát, který by splnil pravidla.'}
+                        </div>
+                        {entry.candidateDoctorIds.length > 0 && (
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                            <select
+                              value={debateSelectionByDay[entry.day] ?? entry.candidateDoctorIds[0]}
+                              onChange={(e) =>
+                                setDebateSelectionByDay((prev) => ({
+                                  ...prev,
+                                  [entry.day]: Number(e.target.value),
+                                }))
+                              }
+                              className="rounded border border-amber-300 bg-white px-2 py-1 text-sm"
+                            >
+                              {entry.candidateDoctorIds.map((doctorId) => {
+                                const doctor = doctors.find((d) => d.id === doctorId);
+                                return (
+                                  <option key={doctorId} value={doctorId}>
+                                    {doctor?.name ?? `Lékař ${doctorId}`}
+                                  </option>
+                                );
+                              })}
+                            </select>
+                            <button
+                              type="button"
+                              onClick={() => applyDebateChoiceAndRecalculate(entry.day)}
+                              className="rounded border border-amber-400 bg-amber-100 px-2 py-1 text-sm text-amber-900"
+                            >
+                              Vybrat a dopočítat
+                            </button>
+                          </div>
+                        )}
                       </li>
                     );
                   })}
