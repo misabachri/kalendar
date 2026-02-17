@@ -1,9 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CZECH_MONTHS, WEEKDAY_SHORT } from './constants';
+import { AMBULANCE_WEEKDAYS_BY_DOCTOR_ID, CZECH_MONTHS, WEEKDAY_SHORT } from './constants';
 import { generateSchedule } from './scheduler';
-import { loadBackupState, loadState, parseStateFromJson, saveBackupState, saveState, type PersistedState } from './storage';
+import {
+  loadBackupState,
+  loadState,
+  parseStateFromJson,
+  saveBackupState,
+  saveState,
+  type PersistedState,
+} from './storage';
 import type { Doctor, PreferenceValue, ScheduleResult } from './types';
-import { daysInMonth, weekdayMondayIndex } from './utils/date';
+import { daysInMonth, weekday, weekdayMondayIndex } from './utils/date';
 
 const PREF_LABELS: Record<PreferenceValue, string> = {
   0: 'Bez omezení',
@@ -112,6 +119,8 @@ export default function App() {
   const [activeDoctorId, setActiveDoctorId] = useState(initial.doctors[0]?.id ?? 1);
   const [backupNotice, setBackupNotice] = useState<string | null>(null);
   const [debateSelectionByDay, setDebateSelectionByDay] = useState<Record<number, number>>({});
+  const [showOnlyProblemDays, setShowOnlyProblemDays] = useState(false);
+  const [resultSelectionByDay, setResultSelectionByDay] = useState<Record<number, number>>({});
   const backupFileInputRef = useRef<HTMLInputElement>(null);
 
   const dayCount = useMemo(() => daysInMonth(year, month), [year, month]);
@@ -192,6 +201,11 @@ export default function App() {
     });
   };
 
+  const clearAllPreferences = () => {
+    setPreferences({});
+    setResult(null);
+  };
+
   const runGenerationWithLocks = (nextLocks: Record<number, number | null>) => {
     const next = generateSchedule({
       year,
@@ -229,22 +243,87 @@ export default function App() {
     [locks, dayCount],
   );
 
-  const toggleLockFromResult = (day: number) => {
-    if (!result || !result.ok) {
+  const confirmLockForDay = (day: number, selectedDoctorId: number): boolean => {
+    const selectedDoctorName = doctors.find((d) => d.id === selectedDoctorId)?.name ?? 'vybraného lékaře';
+    const messages: string[] = [];
+
+    const selectedPreference = preferences[selectedDoctorId]?.[day] ?? 0;
+    if (selectedPreference === 1) {
+      messages.push(`${selectedDoctorName} má na den ${day} nastaveno "Nemůže".`);
+    } else if (selectedPreference === 2) {
+      messages.push(`${selectedDoctorName} má na den ${day} nastaveno "Nechce".`);
+    }
+
+    const conflictingWantDoctors = doctors
+      .filter((doctor) => doctor.id !== selectedDoctorId && (preferences[doctor.id]?.[day] ?? 0) === 3)
+      .sort((a, b) => a.order - b.order);
+    if (conflictingWantDoctors.length > 0) {
+      messages.push(`Na den ${day} má "Chce" ještě ${conflictingWantDoctors.map((doctor) => doctor.name).join(', ')}.`);
+    }
+
+    if (messages.length === 0) {
+      return true;
+    }
+
+    const confirmed = window.confirm(`${messages.join('\n')}\n\nChceš i přesto zamknout ${selectedDoctorName}?`);
+    return confirmed;
+  };
+
+  const applyResultDayChangeAndRecalculate = (day: number) => {
+    const selectedDoctorId = resultSelectionByDay[day];
+    if (!selectedDoctorId) {
       return;
     }
-    const assignedDoctorId = result.assignments[day];
-    setLocks((prev) => {
-      const nextLocks = {
-        ...prev,
-        [day]: prev[day] === assignedDoctorId ? null : assignedDoctorId,
-      };
-      runGenerationWithLocks(nextLocks);
-      return nextLocks;
-    });
+    if (!confirmLockForDay(day, selectedDoctorId)) {
+      return;
+    }
+    const nextLocks = {
+      ...locks,
+      [day]: selectedDoctorId,
+    };
+    setLocks(nextLocks);
+    runGenerationWithLocks(nextLocks);
   };
 
   const weekdayShortForDay = (day: number): string => WEEKDAY_SHORT[weekdayMondayIndex(year, month, day)];
+
+  const problematicDays = useMemo(() => {
+    if (!result || !result.ok) {
+      return [];
+    }
+
+    const items: Array<{ day: number; doctorName: string; reasons: string[] }> = [];
+    for (let day = 1; day <= dayCount; day += 1) {
+      const doctorId = result.assignments[day];
+      const doctor = doctors.find((d) => d.id === doctorId);
+      if (!doctor) {
+        continue;
+      }
+      const reasons: string[] = [];
+      const pref = preferences[doctorId]?.[day] ?? 0;
+      if (pref === 2) {
+        reasons.push('lékař má na dni "Nechce"');
+      }
+      const nextWeekday = (weekday(year, month, day) + 1) % 7;
+      if ((AMBULANCE_WEEKDAYS_BY_DOCTOR_ID[doctorId] ?? []).includes(nextWeekday)) {
+        reasons.push('služba je den před ambulancí');
+      }
+      if (reasons.length > 0) {
+        items.push({ day, doctorName: doctor.name, reasons });
+      }
+    }
+    return items;
+  }, [result, dayCount, doctors, preferences, year, month]);
+
+  const mobileResultDays = useMemo(() => {
+    const allDays = Array.from({ length: dayCount }, (_, idx) => idx + 1);
+    if (!showOnlyProblemDays || problematicDays.length === 0) {
+      return allDays;
+    }
+    const problemSet = new Set(problematicDays.map((item) => item.day));
+    return allDays.filter((day) => problemSet.has(day));
+  }, [dayCount, showOnlyProblemDays, problematicDays]);
+  const problematicDaySet = useMemo(() => new Set(problematicDays.map((item) => item.day)), [problematicDays]);
 
   const currentState = (): PersistedState => ({
     year,
@@ -270,6 +349,7 @@ export default function App() {
     setSeed(next.seed);
     setActiveDoctorId(next.doctors[0]?.id ?? 1);
     setResult(null);
+    setShowOnlyProblemDays(false);
     saveState(next);
   };
 
@@ -393,9 +473,30 @@ export default function App() {
     setDebateSelectionByDay(nextSelection);
   }, [result]);
 
+  useEffect(() => {
+    if (!result || !result.ok) {
+      setShowOnlyProblemDays(false);
+    }
+  }, [result]);
+
+  useEffect(() => {
+    if (!result || !result.ok) {
+      setResultSelectionByDay({});
+      return;
+    }
+    const next: Record<number, number> = {};
+    for (let day = 1; day <= dayCount; day += 1) {
+      next[day] = result.assignments[day];
+    }
+    setResultSelectionByDay(next);
+  }, [result, dayCount]);
+
   const applyDebateChoiceAndRecalculate = (day: number) => {
     const selectedDoctorId = debateSelectionByDay[day];
     if (!selectedDoctorId) {
+      return;
+    }
+    if (!confirmLockForDay(day, selectedDoctorId)) {
       return;
     }
     const nextLocks = {
@@ -404,6 +505,26 @@ export default function App() {
     };
     setLocks(nextLocks);
     runGenerationWithLocks(nextLocks);
+  };
+
+  const lockAllFromCurrentResult = () => {
+    if (!result || !result.ok) {
+      return;
+    }
+    const nextLocks: Record<number, number | null> = { ...locks };
+    for (let day = 1; day <= dayCount; day += 1) {
+      nextLocks[day] = result.assignments[day];
+    }
+    setLocks(nextLocks);
+    runGenerationWithLocks(nextLocks);
+    setBackupNotice('Všechny dny z aktuálního rozpisu byly zamčeny.');
+  };
+
+  const unlockAllDays = () => {
+    const nextLocks: Record<number, number | null> = {};
+    setLocks(nextLocks);
+    runGenerationWithLocks(nextLocks);
+    setBackupNotice('Všechna zamčení byla zrušena.');
   };
 
   return (
@@ -624,6 +745,15 @@ export default function App() {
             Bez omezení → Nemůže → Nechce → Chce.
             {activeDoctor && isCertifiedDoctor(activeDoctor) ? ' (Atestovaný)' : ''}
           </p>
+          <div className="mb-3">
+            <button
+              type="button"
+              onClick={clearAllPreferences}
+              className="rounded border border-rose-300 bg-rose-50 px-3 py-1 text-sm text-rose-700"
+            >
+              Smazat všechny požadavky
+            </button>
+          </div>
 
           <div className="grid grid-cols-7 gap-1 border border-slate-200 p-1 sm:p-2">
               {WEEKDAY_SHORT.map((d) => (
@@ -672,6 +802,18 @@ export default function App() {
             </button>
             <button type="button" onClick={exportCsv} className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto">
               Export CSV
+            </button>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={lockAllFromCurrentResult}
+              className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+            >
+              Zamknout vše z rozpisu
+            </button>
+            <button type="button" onClick={unlockAllDays} className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto">
+              Odemknout vše
             </button>
           </div>
           <div className="mt-3 flex flex-wrap gap-3">
@@ -793,14 +935,58 @@ export default function App() {
 
         {result && result.ok && (
           <>
+            <div className="mb-4 grid gap-3 lg:grid-cols-2">
+              <div className="rounded border border-rose-300 bg-rose-50 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-sm font-semibold text-rose-900">Problémové dny</p>
+                  <label className="flex items-center gap-2 text-sm sm:hidden">
+                    <input
+                      type="checkbox"
+                      checked={showOnlyProblemDays}
+                      onChange={(e) => setShowOnlyProblemDays(e.target.checked)}
+                    />
+                    Jen problémové dny
+                  </label>
+                </div>
+                {problematicDays.length === 0 ? (
+                  <p className="mt-1 text-sm text-emerald-700">Bez problémových dnů podle měkkých pravidel.</p>
+                ) : (
+                  <ul className="mt-2 space-y-1 text-sm text-rose-900">
+                    {problematicDays.map((item) => (
+                      <li key={item.day}>
+                        Den {item.day} ({weekdayShortForDay(item.day)}) - {item.doctorName}: {item.reasons.join(', ')}.
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+              <div className="rounded border border-slate-200 bg-slate-50 p-3">
+                <p className="text-sm font-semibold text-slate-900">Měkká pravidla</p>
+                <ul className="mt-2 list-disc pl-5 text-sm text-slate-700">
+                  <li>Priorita `Chce`; po naplnění cíle už jen preference.</li>
+                  <li>Hlavní priorita je držet požadovaný počet služeb.</li>
+                  <li>Penalizace obden (D a D+2 stejný lékař).</li>
+                  <li>Preferovat, aby lékař nesloužil den před ambulancí.</li>
+                  <li>Vyrovnávání víkendové zátěže.</li>
+                </ul>
+              </div>
+            </div>
             <div className="space-y-2 sm:hidden">
-              {Array.from({ length: dayCount }, (_, idx) => idx + 1).map((day) => {
+              {mobileResultDays.map((day) => {
                 const assignedDoctor = doctors.find((d) => d.id === result.assignments[day]);
                 const isCertified = assignedDoctor ? isCertifiedDoctor(assignedDoctor) : false;
                 return (
                   <div
                     key={day}
-                    className={`rounded border p-3 ${weekdayShortForDay(day) === 'So' || weekdayShortForDay(day) === 'Ne' ? 'border-slate-300 bg-slate-50' : 'border-slate-200 bg-white'}`}
+                    className={`rounded border p-3 ${
+                      locks[day] != null
+                        ? 'border-blue-400 bg-blue-50'
+                        : problematicDaySet.has(day)
+                        ? 'border-rose-300 bg-rose-50'
+                        : weekdayShortForDay(day) === 'So' || weekdayShortForDay(day) === 'Ne'
+                          ? 'border-slate-300 bg-slate-50'
+                          : 'border-slate-200 bg-white'
+                    }`}
                   >
                     <div className="flex items-center justify-between gap-2">
                       <div className="text-sm font-semibold text-slate-700">
@@ -817,13 +1003,31 @@ export default function App() {
                       )}
                     </div>
                     <div className="no-print mt-2">
-                      <button
-                        type="button"
-                        onClick={() => toggleLockFromResult(day)}
-                        className="rounded border border-slate-300 px-2 py-1 text-xs"
-                      >
-                        {locks[day] === result.assignments[day] ? 'Odemknout' : 'Zamknout'}
-                      </button>
+                      <div className="flex flex-col gap-1">
+                        <select
+                          value={resultSelectionByDay[day] ?? result.assignments[day]}
+                          onChange={(e) =>
+                            setResultSelectionByDay((prev) => ({
+                              ...prev,
+                              [day]: Number(e.target.value),
+                            }))
+                          }
+                          className="rounded border border-slate-300 px-2 py-1 text-xs"
+                        >
+                          {doctors.map((doctor) => (
+                            <option key={doctor.id} value={doctor.id}>
+                              {doctor.name}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => applyResultDayChangeAndRecalculate(day)}
+                          className="rounded border border-slate-300 px-2 py-1 text-xs"
+                        >
+                          Zamknout a dopočítat
+                        </button>
+                      </div>
                     </div>
                   </div>
                 );
@@ -837,7 +1041,16 @@ export default function App() {
                   </div>
                 ))}
                 {cells.map((day, idx) => (
-                  <div key={idx} className="min-h-20 border border-slate-100 p-1 sm:min-h-24 sm:p-2">
+                  <div
+                    key={idx}
+                    className={`min-h-20 border p-1 sm:min-h-24 sm:p-2 ${
+                      day && locks[day] != null
+                        ? 'border-blue-400 bg-blue-50'
+                        : day && problematicDaySet.has(day)
+                          ? 'border-rose-300 bg-rose-50'
+                          : 'border-slate-100'
+                    }`}
+                  >
                     {day && (
                       <>
                         <div className="text-[10px] font-semibold text-slate-600 sm:text-xs">{day}</div>
@@ -845,13 +1058,31 @@ export default function App() {
                           {doctors.find((d) => d.id === result.assignments[day])?.name ?? '—'}
                         </div>
                         <div className="no-print mt-2">
-                          <button
-                            type="button"
-                            onClick={() => toggleLockFromResult(day)}
-                            className="rounded border border-slate-300 px-2 py-1 text-xs"
-                          >
-                            {locks[day] === result.assignments[day] ? 'Odemknout' : 'Zamknout'}
-                          </button>
+                          <div className="flex flex-col gap-1">
+                            <select
+                              value={resultSelectionByDay[day] ?? result.assignments[day]}
+                              onChange={(e) =>
+                                setResultSelectionByDay((prev) => ({
+                                  ...prev,
+                                  [day]: Number(e.target.value),
+                                }))
+                              }
+                              className="rounded border border-slate-300 px-1 py-1 text-[10px] sm:text-xs"
+                            >
+                              {doctors.map((doctor) => (
+                                <option key={doctor.id} value={doctor.id}>
+                                  {doctor.name}
+                                </option>
+                              ))}
+                            </select>
+                            <button
+                              type="button"
+                              onClick={() => applyResultDayChangeAndRecalculate(day)}
+                              className="rounded border border-slate-300 px-1 py-1 text-[10px] sm:text-xs"
+                            >
+                              Zamknout a dopočítat
+                            </button>
+                          </div>
                         </div>
                         {locks[day] != null && (
                           <div className="mt-1 text-xs font-medium text-blue-700">

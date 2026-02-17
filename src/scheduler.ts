@@ -22,10 +22,6 @@ function isLeadershipDoctor(doctor: Doctor): boolean {
   return doctor.role === 'primar' || doctor.role === 'zastupce';
 }
 
-function isPoolDoctor(doctor: Doctor): boolean {
-  return doctor.role === 'regular';
-}
-
 function isCertifiedDoctor(doctor: Doctor): boolean {
   return doctor.order <= 5;
 }
@@ -238,7 +234,6 @@ function scoreCandidate(
   doctor: Doctor,
   state: SolveState,
   input: ScheduleInput,
-  poolIds: number[],
   targets: Record<number, number>,
 ): number {
   let score = 0;
@@ -261,23 +256,6 @@ function scoreCandidate(
   const nextCount = (state.counts[doctor.id] ?? 0) + 1;
   score += Math.abs(nextCount - targets[doctor.id]) * 12;
 
-  if (isPoolDoctor(doctor)) {
-    const counts = poolIds.map((id) => state.counts[id] ?? 0);
-    const avg = counts.reduce((a, b) => a + b, 0) / Math.max(poolIds.length, 1);
-    score += Math.abs(nextCount - avg) * 6;
-
-    if (isWeekendServiceDay(input.year, input.month, day)) {
-      const weekends = poolIds.map((id) => weekendCountForDoctor(state.assignments, id, input.year, input.month));
-      const wAvg = weekends.reduce((a, b) => a + b, 0) / Math.max(weekends.length, 1);
-      const nextW = weekendCountForDoctor(state.assignments, doctor.id, input.year, input.month) + 1;
-      score += Math.abs(nextW - wAvg) * 3;
-    }
-  }
-
-  if (isFriday(input.year, input.month, day) && state.assignments[day + 2] === doctor.id) {
-    score -= 6;
-  }
-
   // Soft preference: avoid assigning a doctor the day before their ambulance day.
   const clinicWeekdays = AMBULANCE_WEEKDAYS_BY_DOCTOR_ID[doctor.id] ?? [];
   const nextWeekday = (weekday(input.year, input.month, day) + 1) % 7;
@@ -285,35 +263,7 @@ function scoreCandidate(
     score += 18;
   }
 
-  const wd = weekday(input.year, input.month, day);
-  if (wd === 6) {
-    const friDoctor = state.assignments[day - 1];
-    const sunDoctor = state.assignments[day + 1];
-    if (friDoctor && sunDoctor && friDoctor === sunDoctor && doctor.id === friDoctor) {
-      score += 8;
-    }
-  }
-
   return score;
-}
-
-function weekendCountForDoctor(
-  assignments: Record<number, number>,
-  doctorId: number,
-  year: number,
-  month: number,
-): number {
-  let count = 0;
-  for (const [dayStr, dId] of Object.entries(assignments)) {
-    if (dId !== doctorId) {
-      continue;
-    }
-    const day = Number(dayStr);
-    if (isWeekendServiceDay(year, month, day)) {
-      count += 1;
-    }
-  }
-  return count;
 }
 
 function weekendBlockKey(year: number, month: number, day: number): string | null {
@@ -459,7 +409,6 @@ function solveWithCaps(
   strictTargets: boolean,
 ): { ok: true; assignments: Record<number, number> } | { ok: false; reason: string } {
   const days = daysInMonth(input.year, input.month);
-  const poolIds = input.doctors.filter((d) => isPoolDoctor(d)).map((d) => d.id);
 
   if (strictTargets) {
     const totalTarget = input.doctors.reduce((sum, d) => sum + (targets[d.id] ?? 0), 0);
@@ -509,8 +458,8 @@ function solveWithCaps(
         return bPref - aPref;
       }
 
-      const as = scoreCandidate(targetDay, a, state, input, poolIds, targets) + rng() * 0.001;
-      const bs = scoreCandidate(targetDay, b, state, input, poolIds, targets) + rng() * 0.001;
+      const as = scoreCandidate(targetDay, a, state, input, targets) + rng() * 0.001;
+      const bs = scoreCandidate(targetDay, b, state, input, targets) + rng() * 0.001;
       if (as !== bs) {
         return as - bs;
       }
@@ -578,7 +527,6 @@ function buildPartialProposal(
   unassignedDays: Array<{ day: number; candidateDoctorIds: number[] }>;
 } {
   const days = daysInMonth(input.year, input.month);
-  const poolIds = input.doctors.filter((d) => isPoolDoctor(d)).map((d) => d.id);
   const state = createInitialState(input.doctors);
   const assignments: Record<number, number | null> = {};
   const unassignedDays: Array<{ day: number; candidateDoctorIds: number[] }> = [];
@@ -599,8 +547,8 @@ function buildPartialProposal(
     }
 
     candidates.sort((a, b) => {
-      const as = scoreCandidate(day, a, state, input, poolIds, targets) + rng() * 0.001;
-      const bs = scoreCandidate(day, b, state, input, poolIds, targets) + rng() * 0.001;
+      const as = scoreCandidate(day, a, state, input, targets) + rng() * 0.001;
+      const bs = scoreCandidate(day, b, state, input, targets) + rng() * 0.001;
       if (as !== bs) {
         return as - bs;
       }

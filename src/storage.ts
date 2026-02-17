@@ -14,6 +14,7 @@ export interface PersistedState {
   seed: string;
 }
 
+
 function coerceState(rawParsed: unknown, fallback: PersistedState): PersistedState {
   const parsed = rawParsed as PersistedState & {
     customMaxByDoctor?: Record<number, number>;
