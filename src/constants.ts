@@ -2,6 +2,7 @@ import type { Doctor } from './types';
 
 export const STORAGE_KEY = 'kalendar-sluzeb-v1';
 export const BACKUP_STORAGE_KEY = 'kalendar-sluzeb-v1-backup';
+export const SAVED_VERSIONS_STORAGE_KEY = 'kalendar-sluzeb-v1-saved-versions';
 
 export const DEFAULT_DOCTORS: Doctor[] = [
   { id: 1, order: 1, name: 'Primář', role: 'primar' },

@@ -1,5 +1,5 @@
-import { STORAGE_KEY, BACKUP_STORAGE_KEY, DEFAULT_DOCTORS } from './constants';
-import type { Doctor, PreferenceValue, PreviousMonthLastTwo } from './types';
+import { STORAGE_KEY, BACKUP_STORAGE_KEY, SAVED_VERSIONS_STORAGE_KEY, DEFAULT_DOCTORS } from './constants';
+import type { Doctor, PreferenceValue, PreviousMonthLastTwo, ScheduleResult } from './types';
 import { dayBeforeMonthStart, sameDate } from './utils/date';
 
 export interface PersistedState {
@@ -12,6 +12,30 @@ export interface PersistedState {
   locks: Record<number, number | null>;
   previousMonthLastTwo: PreviousMonthLastTwo;
   seed: string;
+  activePlanSlot?: 1 | 2;
+  secondaryPlan?: {
+    year: number;
+    month: number;
+    preferences: Record<number, Record<number, PreferenceValue>>;
+    locks: Record<number, number | null>;
+    previousMonthLastTwo: PreviousMonthLastTwo;
+    seed: string;
+    finalizedAt?: string;
+  };
+  finalizedAt?: string;
+}
+
+export interface SavedScheduleVersion {
+  id: string;
+  createdAt: string;
+  title: string;
+  state: PersistedState;
+  result: ScheduleResult | null;
+}
+
+function nextMonthOf(year: number, month: number): { year: number; month: number } {
+  const d = new Date(year, month, 1);
+  return { year: d.getFullYear(), month: d.getMonth() + 1 };
 }
 
 
@@ -85,6 +109,28 @@ function coerceState(rawParsed: unknown, fallback: PersistedState): PersistedSta
     ...(parsed.maxShiftsByDoctor ?? {}),
   };
 
+  const fallbackNext = nextMonthOf(fallback.year, fallback.month);
+  const fallbackSecondaryPlan = fallback.secondaryPlan ?? {
+    year: fallbackNext.year,
+    month: fallbackNext.month,
+    preferences: {},
+    locks: {},
+    previousMonthLastTwo: fallback.previousMonthLastTwo,
+    seed: '',
+    finalizedAt: undefined,
+  };
+
+  const rawSecondary = {
+    ...fallbackSecondaryPlan,
+    ...(parsed.secondaryPlan ?? {}),
+  };
+  const primaryNext = nextMonthOf(parsed.year ?? fallback.year, parsed.month ?? fallback.month);
+  const normalizedSecondary = {
+    ...rawSecondary,
+    year: primaryNext.year,
+    month: primaryNext.month,
+  };
+
   return {
     ...fallback,
     ...parsed,
@@ -95,6 +141,9 @@ function coerceState(rawParsed: unknown, fallback: PersistedState): PersistedSta
       ...(parsed.targetShiftsByDoctor ?? {}),
     },
     previousMonthLastTwo: previousMonthLastTwo ?? fallback.previousMonthLastTwo,
+    activePlanSlot: parsed.activePlanSlot === 2 ? 2 : 1,
+    secondaryPlan: normalizedSecondary,
+    finalizedAt: parsed.finalizedAt,
   };
 }
 
@@ -130,9 +179,11 @@ export function makeDefaultState(): PersistedState {
   const now = new Date();
   const doctors = DEFAULT_DOCTORS;
   const maxShiftsByDoctor = defaultMaxByDoctor(doctors);
+  const primaryDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  const secondaryDate = new Date(now.getFullYear(), now.getMonth() + 2, 1);
   return {
-    year: now.getFullYear(),
-    month: now.getMonth() + 1,
+    year: primaryDate.getFullYear(),
+    month: primaryDate.getMonth() + 1,
     doctors,
     maxShiftsByDoctor,
     targetShiftsByDoctor: defaultTargets(doctors, maxShiftsByDoctor),
@@ -140,6 +191,17 @@ export function makeDefaultState(): PersistedState {
     locks: {},
     previousMonthLastTwo: { penultimateDoctorId: null, lastDoctorId: null },
     seed: '',
+    finalizedAt: undefined,
+    activePlanSlot: 1,
+    secondaryPlan: {
+      year: secondaryDate.getFullYear(),
+      month: secondaryDate.getMonth() + 1,
+      preferences: {},
+      locks: {},
+      previousMonthLastTwo: { penultimateDoctorId: null, lastDoctorId: null },
+      seed: '',
+      finalizedAt: undefined,
+    },
   };
 }
 
@@ -183,4 +245,31 @@ export function loadBackupState(): PersistedState | null {
   } catch {
     return null;
   }
+}
+
+export function loadSavedVersions(): SavedScheduleVersion[] {
+  try {
+    const raw = localStorage.getItem(SAVED_VERSIONS_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw) as SavedScheduleVersion[];
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .filter((item) => item && typeof item.id === 'string')
+      .map((item) => ({
+        ...item,
+        state: coerceState(item.state, makeDefaultState()),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+export function saveVersion(version: SavedScheduleVersion): void {
+  const current = loadSavedVersions();
+  const next = [version, ...current].slice(0, 30);
+  localStorage.setItem(SAVED_VERSIONS_STORAGE_KEY, JSON.stringify(next));
 }

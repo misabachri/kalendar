@@ -33,7 +33,7 @@ function isTuesdayOrThursday(year: number, month: number, day: number): boolean 
 
 function makeRng(seed?: string): () => number {
   if (!seed) {
-    return () => 0.5;
+    return () => Math.random();
   }
   let h = 2166136261;
   for (let i = 0; i < seed.length; i += 1) {
@@ -541,8 +541,16 @@ function buildPartialProposal(
         .filter((doctor) => isBaseHardAllowedForDiscussion(day, doctor, state, input))
         .sort((a, b) => a.order - b.order)
         .map((doctor) => doctor.id);
-      assignments[day] = null;
-      unassignedDays.push({ day, candidateDoctorIds: discussionCandidates });
+      if (discussionCandidates.length > 0) {
+        // Prefill a discussion-safe candidate so the user always gets a usable draft schedule.
+        const selectedDoctorId = discussionCandidates[0];
+        assignments[day] = selectedDoctorId;
+        applyAssignment(state, input.year, input.month, day, selectedDoctorId);
+        unassignedDays.push({ day, candidateDoctorIds: discussionCandidates });
+      } else {
+        assignments[day] = null;
+        unassignedDays.push({ day, candidateDoctorIds: discussionCandidates });
+      }
       continue;
     }
 
@@ -646,10 +654,25 @@ export function generateSchedule(input: ScheduleInput): ScheduleResult {
     };
   }
 
+  const partialProposal = buildPartialProposal(input, caps, targets, wantedDoctorsByDay, rng);
+  const hasUnassignedDay = Object.values(partialProposal.assignments).some((doctorId) => doctorId === null);
+  if (!hasUnassignedDay) {
+    const assignments = Object.fromEntries(
+      Object.entries(partialProposal.assignments).map(([day, doctorId]) => [Number(day), doctorId as number]),
+    ) as Record<number, number>;
+    return {
+      ok: true,
+      assignments,
+      stats: buildStats(assignments, input.doctors, input.year, input.month),
+      relaxations: emptyRelaxationSummary(),
+      seedUsed: input.seed || undefined,
+    };
+  }
+
   return {
     ok: false,
     conflicts: [strictAttempt.reason, fallbackAttempt.reason],
     relaxationsAttempted: emptyRelaxationSummary(),
-    partialProposal: buildPartialProposal(input, caps, targets, wantedDoctorsByDay, rng),
+    partialProposal,
   };
 }

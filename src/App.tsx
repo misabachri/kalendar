@@ -3,10 +3,13 @@ import { AMBULANCE_WEEKDAYS_BY_DOCTOR_ID, CZECH_MONTHS, WEEKDAY_SHORT } from './
 import { generateSchedule } from './scheduler';
 import {
   loadBackupState,
+  loadSavedVersions,
   loadState,
   parseStateFromJson,
+  saveVersion,
   saveBackupState,
   saveState,
+  type SavedScheduleVersion,
   type PersistedState,
 } from './storage';
 import type { Doctor, PreferenceValue, ScheduleResult } from './types';
@@ -103,25 +106,129 @@ function monthCells(year: number, month: number, dayCount: number): Array<number
   return cells;
 }
 
+interface MonthlyRequestPlan {
+  year: number;
+  month: number;
+  preferences: Record<number, Record<number, PreferenceValue>>;
+  locks: Record<number, number | null>;
+  previousMonthLastTwo: PersistedState['previousMonthLastTwo'];
+  seed: string;
+  finalizedAt?: string;
+}
+
 export default function App() {
   const initial = useMemo(() => loadState(), []);
 
-  const [year, setYear] = useState(initial.year);
-  const [month, setMonth] = useState(initial.month);
   const [doctors, setDoctors] = useState<Doctor[]>(initial.doctors);
   const [maxShiftsByDoctor, setMaxShiftsByDoctor] = useState(initial.maxShiftsByDoctor);
   const [targetShiftsByDoctor, setTargetShiftsByDoctor] = useState(initial.targetShiftsByDoctor);
-  const [preferences, setPreferences] = useState(initial.preferences);
-  const [locks, setLocks] = useState(initial.locks);
-  const [previousMonthLastTwo, setPreviousMonthLastTwo] = useState(initial.previousMonthLastTwo);
-  const [seed, setSeed] = useState(initial.seed);
+  const [activePlanSlot, setActivePlanSlot] = useState<1 | 2>(initial.activePlanSlot === 2 ? 2 : 1);
+  const [primaryPlan, setPrimaryPlan] = useState<MonthlyRequestPlan>({
+    year: initial.year,
+    month: initial.month,
+    preferences: initial.preferences,
+    locks: initial.locks,
+    previousMonthLastTwo: initial.previousMonthLastTwo,
+    seed: initial.seed,
+    finalizedAt: initial.finalizedAt,
+  });
+  const [secondaryPlan, setSecondaryPlan] = useState<MonthlyRequestPlan>(
+    initial.secondaryPlan ??
+      (() => {
+        const nextDate = new Date(initial.year, initial.month, 1);
+        return {
+          year: nextDate.getFullYear(),
+          month: nextDate.getMonth() + 1,
+          preferences: {},
+          locks: {},
+          previousMonthLastTwo: { penultimateDoctorId: null, lastDoctorId: null },
+          seed: '',
+          finalizedAt: undefined,
+        };
+      })(),
+  );
   const [result, setResult] = useState<ScheduleResult | null>(null);
   const [activeDoctorId, setActiveDoctorId] = useState(initial.doctors[0]?.id ?? 1);
   const [backupNotice, setBackupNotice] = useState<string | null>(null);
   const [debateSelectionByDay, setDebateSelectionByDay] = useState<Record<number, number>>({});
   const [showOnlyProblemDays, setShowOnlyProblemDays] = useState(false);
   const [resultSelectionByDay, setResultSelectionByDay] = useState<Record<number, number>>({});
+  const [showDoctorsSection, setShowDoctorsSection] = useState(false);
+  const [savedVersions, setSavedVersions] = useState<SavedScheduleVersion[]>(() => loadSavedVersions());
+  const [generationNotice, setGenerationNotice] = useState<string | null>(null);
   const backupFileInputRef = useRef<HTMLInputElement>(null);
+
+  const activePlan = activePlanSlot === 1 ? primaryPlan : secondaryPlan;
+  const year = activePlan.year;
+  const month = activePlan.month;
+  const preferences = activePlan.preferences;
+  const locks = activePlan.locks;
+  const previousMonthLastTwo = activePlan.previousMonthLastTwo;
+  const seed = activePlan.seed;
+
+  const setActivePlan = (updater: (prev: MonthlyRequestPlan) => MonthlyRequestPlan) => {
+    if (activePlanSlot === 1) {
+      setPrimaryPlan(updater);
+      return;
+    }
+    setSecondaryPlan(updater);
+  };
+
+  const nextMonthOf = (yearValue: number, monthValue: number): { year: number; month: number } => {
+    const d = new Date(yearValue, monthValue, 1);
+    return { year: d.getFullYear(), month: d.getMonth() + 1 };
+  };
+
+  const setYear = (nextYear: number) => {
+    setPrimaryPlan((prev) => ({ ...prev, year: nextYear, finalizedAt: undefined }));
+    setSecondaryPlan((prev) => {
+      const next = nextMonthOf(nextYear, primaryPlan.month);
+      return { ...prev, year: next.year, month: next.month };
+    });
+    setResult(null);
+  };
+  const setMonth = (nextMonth: number) => {
+    setPrimaryPlan((prev) => ({ ...prev, month: nextMonth, finalizedAt: undefined }));
+    setSecondaryPlan((prev) => {
+      const next = nextMonthOf(primaryPlan.year, nextMonth);
+      return { ...prev, year: next.year, month: next.month };
+    });
+    setResult(null);
+  };
+  const setPreferences = (
+    updater:
+      | Record<number, Record<number, PreferenceValue>>
+      | ((prev: Record<number, Record<number, PreferenceValue>>) => Record<number, Record<number, PreferenceValue>>),
+  ) => {
+    setActivePlan((prev) => ({
+      ...prev,
+      preferences: typeof updater === 'function' ? updater(prev.preferences) : updater,
+      finalizedAt: undefined,
+    }));
+  };
+  const setLocks = (
+    updater: Record<number, number | null> | ((prev: Record<number, number | null>) => Record<number, number | null>),
+  ) => {
+    setActivePlan((prev) => ({
+      ...prev,
+      locks: typeof updater === 'function' ? updater(prev.locks) : updater,
+      finalizedAt: undefined,
+    }));
+  };
+  const setPreviousMonthLastTwo = (
+    updater:
+      | PersistedState['previousMonthLastTwo']
+      | ((prev: PersistedState['previousMonthLastTwo']) => PersistedState['previousMonthLastTwo']),
+  ) => {
+    setActivePlan((prev) => ({
+      ...prev,
+      previousMonthLastTwo: typeof updater === 'function' ? updater(prev.previousMonthLastTwo) : updater,
+      finalizedAt: undefined,
+    }));
+  };
+  const setSeed = (nextSeed: string) => {
+    setActivePlan((prev) => ({ ...prev, seed: nextSeed, finalizedAt: undefined }));
+  };
 
   const dayCount = useMemo(() => daysInMonth(year, month), [year, month]);
   const cells = useMemo(() => monthCells(year, month, dayCount), [year, month, dayCount]);
@@ -135,17 +242,20 @@ export default function App() {
 
   useEffect(() => {
     saveState({
-      year,
-      month,
+      year: primaryPlan.year,
+      month: primaryPlan.month,
       doctors,
       maxShiftsByDoctor,
       targetShiftsByDoctor,
-      preferences,
-      locks,
-      previousMonthLastTwo,
-      seed,
+      preferences: primaryPlan.preferences,
+      locks: primaryPlan.locks,
+      previousMonthLastTwo: primaryPlan.previousMonthLastTwo,
+      seed: primaryPlan.seed,
+      finalizedAt: primaryPlan.finalizedAt,
+      activePlanSlot,
+      secondaryPlan: secondaryPlan,
     });
-  }, [year, month, doctors, maxShiftsByDoctor, targetShiftsByDoctor, preferences, locks, previousMonthLastTwo, seed]);
+  }, [doctors, maxShiftsByDoctor, targetShiftsByDoctor, primaryPlan, secondaryPlan, activePlanSlot]);
 
   const updateDoctorName = (id: number, name: string) => {
     setDoctors((prev) => prev.map((d) => (d.id === id ? { ...d, name } : d)));
@@ -206,7 +316,8 @@ export default function App() {
     setResult(null);
   };
 
-  const runGenerationWithLocks = (nextLocks: Record<number, number | null>) => {
+  const runGenerationWithLocks = (nextLocks: Record<number, number | null>): ScheduleResult => {
+    setActivePlan((prev) => ({ ...prev, finalizedAt: undefined }));
     const next = generateSchedule({
       year,
       month,
@@ -219,10 +330,45 @@ export default function App() {
       seed: seed.trim() || undefined,
     });
     setResult(next);
+    return next;
   };
 
   const runGeneration = () => {
-    runGenerationWithLocks(locks);
+    const previousResult = result;
+    const next = runGenerationWithLocks(locks);
+    if (next.ok && previousResult?.ok) {
+      const sameAssignments =
+        JSON.stringify(next.assignments) === JSON.stringify(previousResult.assignments);
+      setGenerationNotice(
+        sameAssignments
+          ? 'Přegenerování proběhlo, ale vyšel stejný rozpis.'
+          : 'Rozpis byl úspěšně přegenerován.',
+      );
+    } else if (next.ok) {
+      setGenerationNotice('Rozpis byl úspěšně vygenerován.');
+    }
+    if (!next.ok) {
+      setGenerationNotice('Přegenerování selhalo - rozpis nelze při aktuálních požadavcích sestavit.');
+      window.alert('Bohužel nelze vytvořit nový rozpis, protože při aktuálních požadavcích není matematicky realizovatelný.');
+    }
+    if (!next.ok && previousResult?.ok) {
+      const keepPrevious = window.confirm(
+        'Nový pokus o generování nevyšel. Chceš zachovat předchozí verzi a uložit ji do historie verzí?',
+      );
+      if (keepPrevious) {
+        const version: SavedScheduleVersion = {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          createdAt: new Date().toISOString(),
+          title: `${CZECH_MONTHS[month - 1]} ${year} - předchozí funkční verze`,
+          state: currentState(),
+          result: previousResult,
+        };
+        saveVersion(version);
+        setSavedVersions(loadSavedVersions());
+        setResult(previousResult);
+        setBackupNotice('Předchozí funkční verze byla zachována a uložena do historie.');
+      }
+    }
   };
 
   const exportCsv = () => {
@@ -238,13 +384,9 @@ export default function App() {
     downloadCsv(lines.join('\n'), `sluzby-${year}-${String(month).padStart(2, '0')}.csv`);
   };
 
-  const lockedCount = useMemo(
-    () => Array.from({ length: dayCount }, (_, idx) => idx + 1).filter((day) => locks[day] != null).length,
-    [locks, dayCount],
-  );
-
   const confirmLockForDay = (day: number, selectedDoctorId: number): boolean => {
-    const selectedDoctorName = doctors.find((d) => d.id === selectedDoctorId)?.name ?? 'vybraného lékaře';
+    const selectedDoctor = doctors.find((d) => d.id === selectedDoctorId);
+    const selectedDoctorName = selectedDoctor?.name ?? 'vybraného lékaře';
     const messages: string[] = [];
 
     const selectedPreference = preferences[selectedDoctorId]?.[day] ?? 0;
@@ -259,6 +401,38 @@ export default function App() {
       .sort((a, b) => a.order - b.order);
     if (conflictingWantDoctors.length > 0) {
       messages.push(`Na den ${day} má "Chce" ještě ${conflictingWantDoctors.map((doctor) => doctor.name).join(', ')}.`);
+    }
+
+    const dayWeekday = weekday(year, month, day);
+    const isTueOrThu = dayWeekday === 2 || dayWeekday === 4;
+    if (isTueOrThu && selectedDoctor && !isCertifiedDoctor(selectedDoctor)) {
+      messages.push(
+        `${selectedDoctorName} není atestovaný a den ${day} je úterý/čtvrtek. Po zamknutí může být rozpis neřešitelný.`,
+      );
+      const certifiedNoNegative = doctors
+        .filter((doctor) => doctor.order <= 5)
+        .filter((doctor) => {
+          const pref = preferences[doctor.id]?.[day] ?? 0;
+          return pref !== 1 && pref !== 2;
+        })
+        .sort((a, b) => a.order - b.order)
+        .map((doctor) => doctor.name);
+      if (certifiedNoNegative.length > 0) {
+        messages.push(`Atestovaní bez negativního požadavku na den ${day}: ${certifiedNoNegative.join(', ')}.`);
+      }
+    }
+
+    if (selectedPreference === 1 || selectedPreference === 2) {
+      const suggestedDoctors = doctors
+        .filter((doctor) => {
+          const pref = preferences[doctor.id]?.[day] ?? 0;
+          return pref !== 1 && pref !== 2;
+        })
+        .sort((a, b) => a.order - b.order)
+        .map((doctor) => doctor.name);
+      if (suggestedDoctors.length > 0) {
+        messages.push(`Bez negativního požadavku na den ${day}: ${suggestedDoctors.join(', ')}.`);
+      }
     }
 
     if (messages.length === 0) {
@@ -315,6 +489,23 @@ export default function App() {
     return items;
   }, [result, dayCount, doctors, preferences, year, month]);
 
+  const serviceDatesByDoctor = useMemo(() => {
+    const map: Record<number, number[]> = {};
+    for (const doctor of doctors) {
+      map[doctor.id] = [];
+    }
+    if (!result || !result.ok) {
+      return map;
+    }
+    for (let day = 1; day <= dayCount; day += 1) {
+      const doctorId = result.assignments[day];
+      if (doctorId != null) {
+        map[doctorId] = [...(map[doctorId] ?? []), day];
+      }
+    }
+    return map;
+  }, [result, doctors, dayCount]);
+
   const mobileResultDays = useMemo(() => {
     const allDays = Array.from({ length: dayCount }, (_, idx) => idx + 1);
     if (!showOnlyProblemDays || problematicDays.length === 0) {
@@ -326,31 +517,90 @@ export default function App() {
   const problematicDaySet = useMemo(() => new Set(problematicDays.map((item) => item.day)), [problematicDays]);
 
   const currentState = (): PersistedState => ({
-    year,
-    month,
+    year: primaryPlan.year,
+    month: primaryPlan.month,
     doctors,
     maxShiftsByDoctor,
     targetShiftsByDoctor,
-    preferences,
-    locks,
-    previousMonthLastTwo,
-    seed,
+    preferences: primaryPlan.preferences,
+    locks: primaryPlan.locks,
+    previousMonthLastTwo: primaryPlan.previousMonthLastTwo,
+    seed: primaryPlan.seed,
+    finalizedAt: primaryPlan.finalizedAt,
+    activePlanSlot,
+    secondaryPlan: secondaryPlan,
   });
 
   const applyPersistedState = (next: PersistedState): void => {
-    setYear(next.year);
-    setMonth(next.month);
+    setPrimaryPlan({
+      year: next.year,
+      month: next.month,
+      preferences: next.preferences,
+      locks: next.locks,
+      previousMonthLastTwo: next.previousMonthLastTwo,
+      seed: next.seed,
+      finalizedAt: next.finalizedAt,
+    });
+    setSecondaryPlan(
+      next.secondaryPlan ??
+        (() => {
+          const nextDate = new Date(next.year, next.month, 1);
+          return {
+            year: nextDate.getFullYear(),
+            month: nextDate.getMonth() + 1,
+            preferences: {},
+            locks: {},
+            previousMonthLastTwo: { penultimateDoctorId: null, lastDoctorId: null },
+            seed: '',
+            finalizedAt: undefined,
+          };
+        })(),
+    );
+    setActivePlanSlot(next.activePlanSlot === 2 ? 2 : 1);
     setDoctors(next.doctors);
     setMaxShiftsByDoctor(next.maxShiftsByDoctor);
     setTargetShiftsByDoctor(next.targetShiftsByDoctor);
-    setPreferences(next.preferences);
-    setLocks(next.locks);
-    setPreviousMonthLastTwo(next.previousMonthLastTwo);
-    setSeed(next.seed);
     setActiveDoctorId(next.doctors[0]?.id ?? 1);
     setResult(null);
     setShowOnlyProblemDays(false);
     saveState(next);
+  };
+
+  const loadSavedVersion = (version: SavedScheduleVersion) => {
+    const next = version.state;
+    setPrimaryPlan({
+      year: next.year,
+      month: next.month,
+      preferences: next.preferences,
+      locks: next.locks,
+      previousMonthLastTwo: next.previousMonthLastTwo,
+      seed: next.seed,
+      finalizedAt: next.finalizedAt,
+    });
+    setSecondaryPlan(
+      next.secondaryPlan ??
+        (() => {
+          const nextDate = new Date(next.year, next.month, 1);
+          return {
+            year: nextDate.getFullYear(),
+            month: nextDate.getMonth() + 1,
+            preferences: {},
+            locks: {},
+            previousMonthLastTwo: { penultimateDoctorId: null, lastDoctorId: null },
+            seed: '',
+            finalizedAt: undefined,
+          };
+        })(),
+    );
+    setActivePlanSlot(next.activePlanSlot === 2 ? 2 : 1);
+    setDoctors(next.doctors);
+    setMaxShiftsByDoctor(next.maxShiftsByDoctor);
+    setTargetShiftsByDoctor(next.targetShiftsByDoctor);
+    setActiveDoctorId(next.doctors[0]?.id ?? 1);
+    setResult(version.result);
+    setShowOnlyProblemDays(false);
+    saveState(next);
+    setBackupNotice(`Načtena uložená verze: ${version.title}`);
   };
 
   const saveBackupToDevice = () => {
@@ -527,6 +777,44 @@ export default function App() {
     setBackupNotice('Všechna zamčení byla zrušena.');
   };
 
+  const finalizeCurrentSchedule = () => {
+    if (!result || !result.ok) {
+      setBackupNotice('Nejdřív je potřeba vygenerovat rozpis.');
+      return;
+    }
+    const confirmed = window.confirm('Označit tento rozpis jako finální?');
+    if (!confirmed) {
+      return;
+    }
+
+    const finalizedAt = new Date().toISOString();
+    setActivePlan((prev) => ({ ...prev, finalizedAt }));
+
+    if (activePlanSlot === 1) {
+      const penultimateDoctorId = dayCount >= 2 ? result.assignments[dayCount - 1] ?? null : null;
+      const lastDoctorId = result.assignments[dayCount] ?? null;
+      setSecondaryPlan((prev) => ({
+        ...prev,
+        previousMonthLastTwo: {
+          penultimateDoctorId,
+          lastDoctorId,
+        },
+      }));
+      setBackupNotice('Rozpis je finální. Poslední 2 služby byly propsány do dalšího měsíce.');
+      return;
+    }
+
+    setBackupNotice('Rozpis je označen jako finální.');
+  };
+
+  const unsetFinalizedSchedule = () => {
+    setActivePlan((prev) => ({ ...prev, finalizedAt: undefined }));
+    setBackupNotice('Finální stav byl zrušen, rozpis lze dál upravovat.');
+  };
+
+  const primarySlotLabel = `${CZECH_MONTHS[primaryPlan.month - 1]} ${primaryPlan.year}`;
+  const secondarySlotLabel = `${CZECH_MONTHS[secondaryPlan.month - 1]} ${secondaryPlan.year}`;
+
   return (
     <div className="mx-auto max-w-[1200px] overflow-x-hidden px-3 py-4 text-slate-900 sm:px-4 sm:py-6">
       <h1 className="mb-4 text-xl font-bold sm:text-2xl">Měsíční přehled sloužících lékařů</h1>
@@ -534,13 +822,47 @@ export default function App() {
       <div className="no-print space-y-6">
         <section className="rounded-lg bg-white p-4 shadow-sm">
           <h2 className="mb-3 text-lg font-semibold">1) Měsíc + rok</h2>
+          <p className="mb-2 text-sm font-semibold text-slate-700">
+            Aktivní plán: {activePlanSlot === 1 ? primarySlotLabel : secondarySlotLabel}
+          </p>
+          <div className="mb-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setActivePlanSlot(1);
+                setResult(null);
+              }}
+              className={`rounded border px-3 py-1 text-sm ${
+                activePlanSlot === 1
+                  ? 'border-slate-900 bg-slate-900 text-white ring-2 ring-slate-400'
+                  : 'border-slate-300 bg-white text-slate-800'
+              }`}
+            >
+              {activePlanSlot === 1 ? 'Aktivní: ' : ''}Příští měsíc: {primarySlotLabel}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActivePlanSlot(2);
+                setResult(null);
+              }}
+              className={`rounded border px-3 py-1 text-sm ${
+                activePlanSlot === 2
+                  ? 'border-slate-900 bg-slate-900 text-white ring-2 ring-slate-400'
+                  : 'border-slate-300 bg-white text-slate-800'
+              }`}
+            >
+              {activePlanSlot === 2 ? 'Aktivní: ' : ''}Další měsíc: {secondarySlotLabel}
+            </button>
+          </div>
           <div className="flex flex-wrap gap-3">
             <label className="flex w-full items-center gap-2 sm:w-auto">
               <span>Měsíc</span>
               <select
                 value={month}
                 onChange={(e) => setMonth(Number(e.target.value))}
-                className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 sm:flex-none"
+                disabled={activePlanSlot === 2}
+                className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 disabled:bg-slate-100 disabled:text-slate-500 sm:flex-none"
               >
                 {CZECH_MONTHS.map((m, i) => (
                   <option key={m} value={i + 1}>
@@ -555,7 +877,8 @@ export default function App() {
                 type="number"
                 value={year}
                 onChange={(e) => setYear(Number(e.target.value))}
-                className="w-full rounded border border-slate-300 px-2 py-1 sm:w-28"
+                disabled={activePlanSlot === 2}
+                className="w-full rounded border border-slate-300 px-2 py-1 disabled:bg-slate-100 disabled:text-slate-500 sm:w-28"
               />
             </label>
             <label className="flex w-full items-center gap-2 sm:w-auto">
@@ -569,96 +892,111 @@ export default function App() {
               />
             </label>
           </div>
+          {activePlanSlot === 2 && (
+            <p className="mt-2 text-xs text-slate-600">
+              Další měsíc je automaticky navázaný na příští měsíc ({secondarySlotLabel}).
+            </p>
+          )}
         </section>
 
         <section className="rounded-lg bg-white p-4 shadow-sm">
-          <h2 className="mb-3 text-lg font-semibold">2) Lékaři (fixní pořadí #1–#10)</h2>
-          <div className="grid gap-2 md:grid-cols-2">
-            {doctors.map((doctor) => (
-              <div
-                key={doctor.id}
-                className={`min-w-0 rounded border p-2 ${isCertifiedDoctor(doctor) ? 'border-emerald-300 bg-emerald-50/40' : 'border-slate-200'}`}
-              >
-                <div className="mb-2 flex flex-wrap items-center gap-2">
-                  <span className="w-10 text-sm text-slate-600">#{doctor.order}</span>
-                  <span className="text-xs uppercase text-slate-500">{roleLabel(doctor.role)}</span>
-                  {isCertifiedDoctor(doctor) && (
-                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-emerald-800">
-                      Atestovaný
-                    </span>
-                  )}
+          <details
+            open={showDoctorsSection}
+            onToggle={(e) => setShowDoctorsSection((e.target as HTMLDetailsElement).open)}
+            className="group"
+          >
+            <summary className="flex cursor-pointer list-none items-center justify-between rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-800">
+              <span>2) Lékaři (fixní pořadí #1–#10)</span>
+              <span className="text-xs font-medium text-slate-600 group-open:hidden">Rozbalit</span>
+              <span className="hidden text-xs font-medium text-slate-600 group-open:inline">Sbalit</span>
+            </summary>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+              {doctors.map((doctor) => (
+                <div
+                  key={doctor.id}
+                  className={`min-w-0 rounded border p-2 ${isCertifiedDoctor(doctor) ? 'border-emerald-300 bg-emerald-50/40' : 'border-slate-200'}`}
+                >
+                  <div className="mb-1 flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-slate-600">#{doctor.order}</span>
+                    <span className="text-[10px] uppercase text-slate-500">{roleLabel(doctor.role)}</span>
+                    {isCertifiedDoctor(doctor) && (
+                      <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-emerald-800">
+                        Atest.
+                      </span>
+                    )}
+                  </div>
+                  <input
+                    type="text"
+                    value={doctor.name}
+                    onChange={(e) => updateDoctorName(doctor.id, e.target.value)}
+                    disabled={isFixedNamedDoctor(doctor)}
+                    className="mb-2 w-full min-w-0 rounded border border-slate-300 px-2 py-1 text-sm disabled:bg-slate-100 disabled:text-slate-600"
+                  />
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <label className="min-w-0 rounded border border-slate-200 bg-white p-2 text-xs">
+                      <span className="mb-1 block text-slate-600">Max/měsíc</span>
+                      <div className="flex items-center justify-between gap-1">
+                        <button
+                          type="button"
+                          onClick={() => adjustMaxShifts(doctor.id, -1)}
+                          disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
+                          className="rounded border border-slate-300 px-2 py-1 leading-none disabled:bg-slate-100 disabled:text-slate-500"
+                          aria-label={`Snížit max služeb pro ${doctor.name}`}
+                        >
+                          -
+                        </button>
+                        <input
+                          type="number"
+                          min={0}
+                          value={doctor.role === 'primar' ? 1 : doctor.role === 'zastupce' ? 2 : (maxShiftsByDoctor[doctor.id] ?? 5)}
+                          onChange={(e) => updateMaxShifts(doctor.id, e.target.value)}
+                          disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
+                          className="w-14 rounded border border-slate-300 px-1 py-1 text-center text-xs disabled:bg-slate-100 disabled:text-slate-500"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => adjustMaxShifts(doctor.id, 1)}
+                          disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
+                          className="rounded border border-slate-300 px-2 py-1 leading-none disabled:bg-slate-100 disabled:text-slate-500"
+                          aria-label={`Zvýšit max služeb pro ${doctor.name}`}
+                        >
+                          +
+                        </button>
+                      </div>
+                    </label>
+                    <label className="min-w-0 rounded border border-slate-200 bg-white p-2 text-xs">
+                      <span className="mb-1 block text-slate-600">Požadováno</span>
+                      <div className="flex items-center justify-between gap-1">
+                        <button
+                          type="button"
+                          onClick={() => adjustTargetShifts(doctor.id, -1)}
+                          className="rounded border border-slate-300 px-2 py-1 leading-none"
+                          aria-label={`Snížit požadovaný počet služeb pro ${doctor.name}`}
+                        >
+                          -
+                        </button>
+                        <input
+                          type="number"
+                          min={0}
+                          value={targetShiftsByDoctor[doctor.id] ?? 0}
+                          onChange={(e) => updateTargetShifts(doctor.id, e.target.value)}
+                          className="w-14 rounded border border-slate-300 px-1 py-1 text-center text-xs"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => adjustTargetShifts(doctor.id, 1)}
+                          className="rounded border border-slate-300 px-2 py-1 leading-none"
+                          aria-label={`Zvýšit požadovaný počet služeb pro ${doctor.name}`}
+                        >
+                          +
+                        </button>
+                      </div>
+                    </label>
+                  </div>
                 </div>
-                <input
-                  type="text"
-                  value={doctor.name}
-                  onChange={(e) => updateDoctorName(doctor.id, e.target.value)}
-                  disabled={isFixedNamedDoctor(doctor)}
-                  className="mb-2 w-full min-w-0 rounded border border-slate-300 px-2 py-1 disabled:bg-slate-100 disabled:text-slate-600"
-                />
-                <div className="grid gap-2 sm:grid-cols-2">
-                  <label className="min-w-0 rounded border border-slate-200 bg-white p-2 text-sm">
-                    <span className="mb-2 block text-xs text-slate-600">Max služeb/měsíc</span>
-                    <div className="flex items-center justify-between gap-2">
-                      <button
-                        type="button"
-                        onClick={() => adjustMaxShifts(doctor.id, -1)}
-                        disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
-                        className="rounded border border-slate-300 px-2 py-1 leading-none disabled:bg-slate-100 disabled:text-slate-500"
-                        aria-label={`Snížit max služeb pro ${doctor.name}`}
-                      >
-                        -
-                      </button>
-                      <input
-                        type="number"
-                        min={0}
-                        value={doctor.role === 'primar' ? 1 : doctor.role === 'zastupce' ? 2 : (maxShiftsByDoctor[doctor.id] ?? 5)}
-                        onChange={(e) => updateMaxShifts(doctor.id, e.target.value)}
-                        disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
-                        className="w-16 rounded border border-slate-300 px-1 py-1 text-center disabled:bg-slate-100 disabled:text-slate-500"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => adjustMaxShifts(doctor.id, 1)}
-                        disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
-                        className="rounded border border-slate-300 px-2 py-1 leading-none disabled:bg-slate-100 disabled:text-slate-500"
-                        aria-label={`Zvýšit max služeb pro ${doctor.name}`}
-                      >
-                        +
-                      </button>
-                    </div>
-                  </label>
-                  <label className="min-w-0 rounded border border-slate-200 bg-white p-2 text-sm">
-                    <span className="mb-2 block text-xs text-slate-600">Požadovaný počet služeb</span>
-                    <div className="flex items-center justify-between gap-2">
-                      <button
-                        type="button"
-                        onClick={() => adjustTargetShifts(doctor.id, -1)}
-                        className="rounded border border-slate-300 px-2 py-1 leading-none"
-                        aria-label={`Snížit požadovaný počet služeb pro ${doctor.name}`}
-                      >
-                        -
-                      </button>
-                      <input
-                        type="number"
-                        min={0}
-                        value={targetShiftsByDoctor[doctor.id] ?? 0}
-                        onChange={(e) => updateTargetShifts(doctor.id, e.target.value)}
-                        className="w-16 rounded border border-slate-300 px-1 py-1 text-center"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => adjustTargetShifts(doctor.id, 1)}
-                        className="rounded border border-slate-300 px-2 py-1 leading-none"
-                        aria-label={`Zvýšit požadovaný počet služeb pro ${doctor.name}`}
-                      >
-                        +
-                      </button>
-                    </div>
-                  </label>
-                </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          </details>
         </section>
 
         <section className="rounded-lg bg-white p-4 shadow-sm">
@@ -784,7 +1122,6 @@ export default function App() {
 
         <section className="rounded-lg bg-white p-4 shadow-sm">
           <h2 className="mb-3 text-lg font-semibold">5) Generování</h2>
-          <div className="mb-3 text-sm text-slate-600">Aktuálně zamčeno dní: {lockedCount}</div>
           <div className="flex flex-wrap gap-3">
             <button
               type="button"
@@ -793,74 +1130,15 @@ export default function App() {
             >
               Generovat rozpis
             </button>
-            <button
-              type="button"
-              onClick={printSchedule}
-              className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
-            >
-              Tisk A4
-            </button>
-            <button type="button" onClick={exportCsv} className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto">
-              Export CSV
-            </button>
           </div>
-          <div className="mt-3 flex flex-wrap gap-3">
-            <button
-              type="button"
-              onClick={lockAllFromCurrentResult}
-              className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
-            >
-              Zamknout vše z rozpisu
-            </button>
-            <button type="button" onClick={unlockAllDays} className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto">
-              Odemknout vše
-            </button>
-          </div>
-          <div className="mt-3 flex flex-wrap gap-3">
-            <button
-              type="button"
-              onClick={saveBackupToDevice}
-              className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
-            >
-              Uložit zálohu (zařízení)
-            </button>
-            <button
-              type="button"
-              onClick={restoreBackupFromDevice}
-              className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
-            >
-              Obnovit poslední zálohu
-            </button>
-            <button
-              type="button"
-              onClick={exportBackupFile}
-              className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
-            >
-              Stáhnout zálohu (JSON)
-            </button>
-            <button
-              type="button"
-              onClick={() => backupFileInputRef.current?.click()}
-              className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
-            >
-              Načíst zálohu (JSON)
-            </button>
-            <input
-              ref={backupFileInputRef}
-              type="file"
-              accept="application/json,.json"
-              className="hidden"
-              onChange={async (e) => {
-                await importBackupFile(e.target.files?.[0] ?? null);
-                e.currentTarget.value = '';
-              }}
-            />
-          </div>
-          {backupNotice && <p className="mt-3 text-sm text-slate-600">{backupNotice}</p>}
         </section>
       </div>
 
-      <section className="mt-6 rounded-lg bg-white p-4 shadow-sm print:shadow-none">
+      <section
+        className={`mt-6 rounded-lg p-4 shadow-sm print:shadow-none ${
+          activePlan.finalizedAt ? 'border border-emerald-300 bg-emerald-50' : 'bg-white'
+        }`}
+      >
         <h2 className="mb-2 text-xl font-semibold">
           Služby – {CZECH_MONTHS[month - 1]} {year}
         </h2>
@@ -875,6 +1153,15 @@ export default function App() {
                 <li key={c}>{c}</li>
               ))}
             </ul>
+            <div className="no-print mt-3">
+              <button
+                type="button"
+                onClick={runGeneration}
+                className="rounded border border-rose-300 bg-rose-50 px-3 py-1 text-sm text-rose-700"
+              >
+                Zkusit znovu
+              </button>
+            </div>
             {result.partialProposal && (
               <div className="mt-4 rounded border border-amber-300 bg-amber-50 p-3">
                 <p className="text-sm font-semibold text-amber-900">Návrh k debatě (s neobsazenými dny)</p>
@@ -935,7 +1222,64 @@ export default function App() {
 
         {result && result.ok && (
           <>
-            <div className="mb-4 grid gap-3 lg:grid-cols-2">
+            <div className="no-print mb-4 flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={runGeneration}
+                className="w-full rounded bg-slate-900 px-4 py-2 text-white sm:w-auto"
+              >
+                Vygenerovat znovu
+              </button>
+              <button
+                type="button"
+                onClick={printSchedule}
+                className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+              >
+                Tisk A4
+              </button>
+              <button
+                type="button"
+                onClick={exportCsv}
+                className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+              >
+                Export CSV
+              </button>
+              <button
+                type="button"
+                onClick={finalizeCurrentSchedule}
+                className="w-full rounded bg-emerald-600 px-4 py-2 text-white sm:w-auto"
+              >
+                Označit jako finální
+              </button>
+              <button
+                type="button"
+                onClick={unsetFinalizedSchedule}
+                className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+              >
+                Zrušit finální stav
+              </button>
+              <button
+                type="button"
+                onClick={lockAllFromCurrentResult}
+                className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+              >
+                Zamknout vše z rozpisu
+              </button>
+              <button
+                type="button"
+                onClick={unlockAllDays}
+                className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+              >
+                Odemknout vše
+              </button>
+              {activePlan.finalizedAt && (
+                <span className="text-sm font-medium text-emerald-700">
+                  Finální potvrzení: {new Date(activePlan.finalizedAt).toLocaleString('cs-CZ')}
+                </span>
+              )}
+            </div>
+            {generationNotice && <p className="no-print mb-3 text-sm text-slate-700">{generationNotice}</p>}
+            <div className="mb-4">
               <div className="rounded border border-rose-300 bg-rose-50 p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <p className="text-sm font-semibold text-rose-900">Problémové dny</p>
@@ -959,16 +1303,6 @@ export default function App() {
                     ))}
                   </ul>
                 )}
-              </div>
-              <div className="rounded border border-slate-200 bg-slate-50 p-3">
-                <p className="text-sm font-semibold text-slate-900">Měkká pravidla</p>
-                <ul className="mt-2 list-disc pl-5 text-sm text-slate-700">
-                  <li>Priorita `Chce`; po naplnění cíle už jen preference.</li>
-                  <li>Hlavní priorita je držet požadovaný počet služeb.</li>
-                  <li>Penalizace obden (D a D+2 stejný lékař).</li>
-                  <li>Preferovat, aby lékař nesloužil den před ambulancí.</li>
-                  <li>Vyrovnávání víkendové zátěže.</li>
-                </ul>
               </div>
             </div>
             <div className="space-y-2 sm:hidden">
@@ -1115,6 +1449,12 @@ export default function App() {
                         <span className={`rounded px-2 py-1 ${diffClass}`}>Rozdíl: {diffText}</span>
                         <span className="rounded bg-slate-100 px-2 py-1 text-slate-700">Víkendy: {weekend}</span>
                       </div>
+                      <div className="mt-2 text-xs text-slate-700">
+                        Datumy služeb:{' '}
+                        {serviceDatesByDoctor[doctor.id] && serviceDatesByDoctor[doctor.id].length > 0
+                          ? serviceDatesByDoctor[doctor.id].join(', ')
+                          : '—'}
+                      </div>
                     </div>
                   );
                 })}
@@ -1127,6 +1467,79 @@ export default function App() {
               </p>
             </div>
           </>
+        )}
+      </section>
+
+      <section className="no-print mt-6 rounded-lg bg-white p-4 shadow-sm">
+        <h2 className="mb-3 text-lg font-semibold">Zálohy a Obnova</h2>
+        <div className="flex flex-wrap gap-3">
+          <button
+            type="button"
+            onClick={saveBackupToDevice}
+            className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+          >
+            Uložit zálohu (zařízení)
+          </button>
+          <button
+            type="button"
+            onClick={restoreBackupFromDevice}
+            className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+          >
+            Obnovit poslední zálohu
+          </button>
+          <button
+            type="button"
+            onClick={exportBackupFile}
+            className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+          >
+            Stáhnout zálohu (JSON)
+          </button>
+          <button
+            type="button"
+            onClick={() => backupFileInputRef.current?.click()}
+            className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+          >
+            Načíst zálohu (JSON)
+          </button>
+          <input
+            ref={backupFileInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={async (e) => {
+              await importBackupFile(e.target.files?.[0] ?? null);
+              e.currentTarget.value = '';
+            }}
+          />
+        </div>
+        {backupNotice && <p className="mt-3 text-sm text-slate-600">{backupNotice}</p>}
+      </section>
+
+      <section className="no-print mt-6 rounded-lg bg-white p-4 shadow-sm">
+        <h2 className="mb-3 text-lg font-semibold">Uložené Verze</h2>
+        {savedVersions.length === 0 ? (
+          <p className="text-sm text-slate-600">Zatím nejsou uložené žádné verze.</p>
+        ) : (
+          <div className="space-y-2">
+            {savedVersions.map((version) => (
+              <div
+                key={version.id}
+                className="flex flex-col gap-2 rounded border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <div className="text-sm text-slate-700">
+                  <div className="font-medium text-slate-800">{version.title}</div>
+                  <div>Uloženo: {new Date(version.createdAt).toLocaleString('cs-CZ')}</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => loadSavedVersion(version)}
+                  className="rounded border border-slate-300 bg-white px-3 py-1 text-sm"
+                >
+                  Načíst verzi
+                </button>
+              </div>
+            ))}
+          </div>
         )}
       </section>
     </div>
