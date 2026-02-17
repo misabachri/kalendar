@@ -94,14 +94,21 @@ function escapeHtml(text: string): string {
     .replace(/'/g, '&#39;');
 }
 
-function monthCells(year: number, month: number, dayCount: number): Array<number | null> {
+interface CalendarCell {
+  day: number | null;
+  nextMonthDay: number | null;
+}
+
+function monthCells(year: number, month: number, dayCount: number): CalendarCell[] {
   const firstWeekday = weekdayMondayIndex(year, month, 1);
-  const cells: Array<number | null> = Array.from({ length: firstWeekday }, () => null);
+  const cells: CalendarCell[] = Array.from({ length: firstWeekday }, () => ({ day: null, nextMonthDay: null }));
   for (let day = 1; day <= dayCount; day += 1) {
-    cells.push(day);
+    cells.push({ day, nextMonthDay: null });
   }
+  let nextMonthDay = 1;
   while (cells.length % 7 !== 0) {
-    cells.push(null);
+    cells.push({ day: null, nextMonthDay });
+    nextMonthDay += 1;
   }
   return cells;
 }
@@ -156,6 +163,7 @@ export default function App() {
   const [showDoctorsSection, setShowDoctorsSection] = useState(false);
   const [savedVersions, setSavedVersions] = useState<SavedScheduleVersion[]>(() => loadSavedVersions());
   const [generationNotice, setGenerationNotice] = useState<string | null>(null);
+  const [isExpertMode, setIsExpertMode] = useState(false);
   const backupFileInputRef = useRef<HTMLInputElement>(null);
 
   const activePlan = activePlanSlot === 1 ? primaryPlan : secondaryPlan;
@@ -180,18 +188,44 @@ export default function App() {
   };
 
   const setYear = (nextYear: number) => {
-    setPrimaryPlan((prev) => ({ ...prev, year: nextYear, finalizedAt: undefined }));
+    setPrimaryPlan((prev) => ({
+      ...prev,
+      year: nextYear,
+      preferences: {},
+      locks: {},
+      finalizedAt: undefined,
+    }));
     setSecondaryPlan((prev) => {
       const next = nextMonthOf(nextYear, primaryPlan.month);
-      return { ...prev, year: next.year, month: next.month };
+      return {
+        ...prev,
+        year: next.year,
+        month: next.month,
+        preferences: {},
+        locks: {},
+        finalizedAt: undefined,
+      };
     });
     setResult(null);
   };
   const setMonth = (nextMonth: number) => {
-    setPrimaryPlan((prev) => ({ ...prev, month: nextMonth, finalizedAt: undefined }));
+    setPrimaryPlan((prev) => ({
+      ...prev,
+      month: nextMonth,
+      preferences: {},
+      locks: {},
+      finalizedAt: undefined,
+    }));
     setSecondaryPlan((prev) => {
       const next = nextMonthOf(primaryPlan.year, nextMonth);
-      return { ...prev, year: next.year, month: next.month };
+      return {
+        ...prev,
+        year: next.year,
+        month: next.month,
+        preferences: {},
+        locks: {},
+        finalizedAt: undefined,
+      };
     });
     setResult(null);
   };
@@ -311,9 +345,11 @@ export default function App() {
     });
   };
 
-  const clearAllPreferences = () => {
+  const clearCurrentMonthRequirements = () => {
     setPreferences({});
+    setLocks({});
     setResult(null);
+    setGenerationNotice(null);
   };
 
   const runGenerationWithLocks = (nextLocks: Record<number, number | null>): ScheduleResult => {
@@ -330,6 +366,24 @@ export default function App() {
       seed: seed.trim() || undefined,
     });
     setResult(next);
+    if (next.ok) {
+      const mergedLocks: Record<number, number | null> = { ...nextLocks };
+      let changed = false;
+      for (let day = 1; day <= dayCount; day += 1) {
+        const assignedDoctorId = next.assignments[day];
+        if (!assignedDoctorId) {
+          continue;
+        }
+        const pref = preferences[assignedDoctorId]?.[day] ?? 0;
+        if (pref === 3 && mergedLocks[day] !== assignedDoctorId) {
+          mergedLocks[day] = assignedDoctorId;
+          changed = true;
+        }
+      }
+      if (changed) {
+        setLocks(mergedLocks);
+      }
+    }
     return next;
   };
 
@@ -401,10 +455,98 @@ export default function App() {
     const selectedDoctor = doctors.find((d) => d.id === selectedDoctorId);
     const selectedDoctorName = selectedDoctor?.name ?? 'vybraného lékaře';
     const messages: string[] = [];
+    const dayWeekday = weekday(year, month, day);
+    const isTueOrThu = dayWeekday === 2 || dayWeekday === 4;
+
+    const idealReplacementNames = (): string[] => {
+      const pool = doctors
+        .filter((doctor) => doctor.id !== selectedDoctorId)
+        .sort((a, b) => a.order - b.order);
+
+      const assignedDoctorAtDay = (targetDay: number): number | null => {
+        if (targetDay < 1 || targetDay > dayCount) {
+          return null;
+        }
+        const fromLock = locks[targetDay];
+        if (fromLock !== null && fromLock !== undefined) {
+          return fromLock;
+        }
+        if (result && result.ok) {
+          return result.assignments[targetDay] ?? null;
+        }
+        return null;
+      };
+      const nearbyAssignedDoctorIds = new Set<number>();
+      for (const nearDay of [day - 2, day - 1, day + 1, day + 2]) {
+        const nearDoctorId = assignedDoctorAtDay(nearDay);
+        if (nearDoctorId != null) {
+          nearbyAssignedDoctorIds.add(nearDoctorId);
+        }
+      }
+      const nearSafePool = pool.filter((doctor) => !nearbyAssignedDoctorIds.has(doctor.id));
+      const effectivePool = nearSafePool.length > 0 ? nearSafePool : pool;
+
+      const okCertified = effectivePool.filter(
+        (doctor) => (preferences[doctor.id]?.[day] ?? 0) === 0 && (!isTueOrThu || isCertifiedDoctor(doctor)),
+      );
+      const okAny = effectivePool.filter((doctor) => (preferences[doctor.id]?.[day] ?? 0) === 0);
+      const nonNegativeCertified = effectivePool.filter(
+        (doctor) => (preferences[doctor.id]?.[day] ?? 0) !== 1 && (preferences[doctor.id]?.[day] ?? 0) !== 2 && (!isTueOrThu || isCertifiedDoctor(doctor)),
+      );
+      const nonNegativeAny = effectivePool.filter(
+        (doctor) => (preferences[doctor.id]?.[day] ?? 0) !== 1 && (preferences[doctor.id]?.[day] ?? 0) !== 2,
+      );
+
+      const orderedUnique: Doctor[] = [];
+      const seen = new Set<number>();
+      for (const group of [okCertified, okAny, nonNegativeCertified, nonNegativeAny]) {
+        for (const doctor of group) {
+          if (seen.has(doctor.id)) {
+            continue;
+          }
+          seen.add(doctor.id);
+          orderedUnique.push(doctor);
+        }
+      }
+      return orderedUnique.map((doctor) => doctor.name);
+    };
+    const idealNames = idealReplacementNames();
+
+    if (selectedDoctor && (selectedDoctor.role === 'primar' || selectedDoctor.role === 'zastupce')) {
+      const maxAllowed = maxShiftsByDoctor[selectedDoctorId] ?? (selectedDoctor.role === 'primar' ? 1 : 2);
+      let projectedCount = 0;
+      if (result && result.ok) {
+        for (let d = 1; d <= dayCount; d += 1) {
+          const currentDoctorId = d === day ? selectedDoctorId : result.assignments[d];
+          if (currentDoctorId === selectedDoctorId) {
+            projectedCount += 1;
+          }
+        }
+      } else {
+        projectedCount = Object.entries(locks).filter(([dayStr, doctorId]) => {
+          if (Number(dayStr) === day) {
+            return selectedDoctorId === doctorId;
+          }
+          return doctorId === selectedDoctorId;
+        }).length;
+        if (locks[day] !== selectedDoctorId) {
+          projectedCount += 1;
+        }
+      }
+      if (projectedCount > maxAllowed) {
+        window.alert(`${selectedDoctorName} má maximum ${maxAllowed} služeb a tuto hodnotu nelze překročit.`);
+        return false;
+      }
+    }
 
     const selectedPreference = preferences[selectedDoctorId]?.[day] ?? 0;
     if (selectedPreference === 1) {
-      messages.push(`${selectedDoctorName} má na den ${day} nastaveno "Nemůže".`);
+      const suggestionText =
+        idealNames.length > 0
+          ? `\nIdeální náhrada: ${idealNames.join(', ')}.`
+          : '';
+      window.alert(`${selectedDoctorName} má na den ${day} nastaveno "Nemůže", proto ho nelze zamknout.${suggestionText}`);
+      return false;
     } else if (selectedPreference === 2) {
       messages.push(`${selectedDoctorName} má na den ${day} nastaveno "Nechce".`);
     }
@@ -416,36 +558,25 @@ export default function App() {
       messages.push(`Na den ${day} má "Chce" ještě ${conflictingWantDoctors.map((doctor) => doctor.name).join(', ')}.`);
     }
 
-    const dayWeekday = weekday(year, month, day);
-    const isTueOrThu = dayWeekday === 2 || dayWeekday === 4;
+    const prevDayAssignedDoctorId =
+      (day > 1 ? (locks[day - 1] ?? (result && result.ok ? result.assignments[day - 1] : null)) : null) ?? null;
+    const nextDayAssignedDoctorId =
+      (day < dayCount ? (locks[day + 1] ?? (result && result.ok ? result.assignments[day + 1] : null)) : null) ?? null;
+    if (prevDayAssignedDoctorId === selectedDoctorId) {
+      messages.push(`${selectedDoctorName} už slouží den předtím (den ${day - 1}).`);
+    }
+    if (nextDayAssignedDoctorId === selectedDoctorId) {
+      messages.push(`${selectedDoctorName} už slouží den poté (den ${day + 1}).`);
+    }
+
     if (isTueOrThu && selectedDoctor && !isCertifiedDoctor(selectedDoctor)) {
       messages.push(
         `${selectedDoctorName} není atestovaný a den ${day} je úterý/čtvrtek. Po zamknutí může být rozpis neřešitelný.`,
       );
-      const certifiedNoNegative = doctors
-        .filter((doctor) => doctor.order <= 5)
-        .filter((doctor) => {
-          const pref = preferences[doctor.id]?.[day] ?? 0;
-          return pref !== 1 && pref !== 2;
-        })
-        .sort((a, b) => a.order - b.order)
-        .map((doctor) => doctor.name);
-      if (certifiedNoNegative.length > 0) {
-        messages.push(`Atestovaní bez negativního požadavku na den ${day}: ${certifiedNoNegative.join(', ')}.`);
-      }
     }
 
-    if (selectedPreference === 1 || selectedPreference === 2) {
-      const suggestedDoctors = doctors
-        .filter((doctor) => {
-          const pref = preferences[doctor.id]?.[day] ?? 0;
-          return pref !== 1 && pref !== 2;
-        })
-        .sort((a, b) => a.order - b.order)
-        .map((doctor) => doctor.name);
-      if (suggestedDoctors.length > 0) {
-        messages.push(`Bez negativního požadavku na den ${day}: ${suggestedDoctors.join(', ')}.`);
-      }
+    if (idealNames.length > 0 && (selectedPreference === 2 || (isTueOrThu && selectedDoctor && !isCertifiedDoctor(selectedDoctor)))) {
+      messages.push(`Ideální náhrada pro den ${day}: ${idealNames.join(', ')}.`);
     }
 
     if (messages.length === 0) {
@@ -462,6 +593,12 @@ export default function App() {
       return;
     }
     if (!confirmLockForDay(day, selectedDoctorId)) {
+      if (result && result.ok) {
+        setResultSelectionByDay((prev) => ({
+          ...prev,
+          [day]: result.assignments[day],
+        }));
+      }
       return;
     }
     const nextLocks = {
@@ -473,6 +610,13 @@ export default function App() {
   };
 
   const weekdayShortForDay = (day: number): string => WEEKDAY_SHORT[weekdayMondayIndex(year, month, day)];
+  const isSoftWantLockedDay = (day: number): boolean => {
+    const lockedDoctorId = locks[day];
+    if (lockedDoctorId == null) {
+      return false;
+    }
+    return (preferences[lockedDoctorId]?.[day] ?? 0) === 3;
+  };
 
   const problematicDays = useMemo(() => {
     if (!result || !result.ok) {
@@ -790,6 +934,13 @@ export default function App() {
     setBackupNotice('Všechna zamčení byla zrušena.');
   };
 
+  const unlockDay = (day: number) => {
+    const nextLocks: Record<number, number | null> = { ...locks };
+    delete nextLocks[day];
+    setLocks(nextLocks);
+    setBackupNotice(`Den ${day} byl odemčen.`);
+  };
+
   const finalizeCurrentSchedule = () => {
     if (!result || !result.ok) {
       setBackupNotice('Nejdřív je potřeba vygenerovat rozpis.');
@@ -827,47 +978,58 @@ export default function App() {
 
   const primarySlotLabel = `${CZECH_MONTHS[primaryPlan.month - 1]} ${primaryPlan.year}`;
   const secondarySlotLabel = `${CZECH_MONTHS[secondaryPlan.month - 1]} ${secondaryPlan.year}`;
+  const finalizedMonthHistory = useMemo(() => {
+    return savedVersions
+      .flatMap((version) => {
+        if (!version.state.finalizedAt || !version.result || !version.result.ok) {
+          return [];
+        }
+        const versionDayCount = daysInMonth(version.state.year, version.state.month);
+        const assignments = version.result.assignments;
+        return {
+          id: version.id,
+          label: `${CZECH_MONTHS[version.state.month - 1]} ${version.state.year}`,
+          penultimateDoctorId: versionDayCount >= 2 ? assignments[versionDayCount - 1] ?? null : null,
+          lastDoctorId: assignments[versionDayCount] ?? null,
+          createdAt: version.createdAt,
+        };
+      })
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [savedVersions]);
 
   return (
     <div className="mx-auto max-w-[1200px] overflow-x-hidden px-3 py-4 text-slate-900 sm:px-4 sm:py-6">
       <h1 className="mb-4 text-xl font-bold sm:text-2xl">Měsíční přehled sloužících lékařů</h1>
 
+      <div className="no-print mb-6 grid gap-2 sm:grid-cols-2">
+        <button
+          type="button"
+          onClick={() => setIsExpertMode(false)}
+          className={`rounded-xl border px-4 py-3 text-left text-base font-semibold transition ${
+            !isExpertMode
+              ? 'border-slate-900 bg-gradient-to-r from-slate-900 to-slate-700 text-white shadow'
+              : 'border-slate-300 bg-white text-slate-800'
+          }`}
+        >
+          Zadání požadavků a generování
+        </button>
+        <button
+          type="button"
+          onClick={() => setIsExpertMode(true)}
+          className={`rounded-xl border px-4 py-3 text-left text-base font-semibold transition ${
+            isExpertMode
+              ? 'border-slate-900 bg-gradient-to-r from-slate-900 to-slate-700 text-white shadow'
+              : 'border-slate-300 bg-white text-slate-800'
+          }`}
+        >
+          Pokročilé nastavení
+        </button>
+      </div>
+
       <div className="no-print space-y-6">
+
         <section className="rounded-lg bg-white p-4 shadow-sm">
-          <h2 className="mb-3 text-lg font-semibold">1) Měsíc + rok</h2>
-          <p className="mb-2 text-sm font-semibold text-slate-700">
-            Aktivní plán: {activePlanSlot === 1 ? primarySlotLabel : secondarySlotLabel}
-          </p>
-          <div className="mb-3 flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                setActivePlanSlot(1);
-                setResult(null);
-              }}
-              className={`rounded border px-3 py-1 text-sm ${
-                activePlanSlot === 1
-                  ? 'border-slate-900 bg-slate-900 text-white ring-2 ring-slate-400'
-                  : 'border-slate-300 bg-white text-slate-800'
-              }`}
-            >
-              {activePlanSlot === 1 ? 'Aktivní: ' : ''}Příští měsíc: {primarySlotLabel}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setActivePlanSlot(2);
-                setResult(null);
-              }}
-              className={`rounded border px-3 py-1 text-sm ${
-                activePlanSlot === 2
-                  ? 'border-slate-900 bg-slate-900 text-white ring-2 ring-slate-400'
-                  : 'border-slate-300 bg-white text-slate-800'
-              }`}
-            >
-              {activePlanSlot === 2 ? 'Aktivní: ' : ''}Další měsíc: {secondarySlotLabel}
-            </button>
-          </div>
+          <h2 className="mb-3 text-lg font-semibold">1) Měsíc</h2>
           <div className="flex flex-wrap gap-3">
             <label className="flex w-full items-center gap-2 sm:w-auto">
               <span>Měsíc</span>
@@ -894,127 +1056,131 @@ export default function App() {
                 className="w-full rounded border border-slate-300 px-2 py-1 disabled:bg-slate-100 disabled:text-slate-500 sm:w-28"
               />
             </label>
-            <label className="flex w-full items-center gap-2 sm:w-auto">
-              <span>Seed (volitelný)</span>
-              <input
-                type="text"
-                value={seed}
-                onChange={(e) => setSeed(e.target.value)}
-                className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1"
-                placeholder="např. pokus-2"
-              />
-            </label>
+            {isExpertMode && (
+              <label className="flex w-full items-center gap-2 sm:w-auto">
+                <span>Seed (volitelný)</span>
+                <input
+                  type="text"
+                  value={seed}
+                  onChange={(e) => setSeed(e.target.value)}
+                  className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1"
+                  placeholder="např. pokus-2"
+                />
+              </label>
+            )}
           </div>
-          {activePlanSlot === 2 && (
-            <p className="mt-2 text-xs text-slate-600">
-              Další měsíc je automaticky navázaný na příští měsíc ({secondarySlotLabel}).
-            </p>
-          )}
+          {activePlanSlot === 2 && <p className="mt-2 text-xs text-slate-600">Druhý plán je automaticky navázaný na následující měsíc.</p>}
+          {!isExpertMode && <p className="mt-2 text-xs text-slate-600">Pokročilé volby jsou dostupné v záložce Pokročilé nastavení.</p>}
         </section>
 
-        <section className="rounded-lg bg-white p-4 shadow-sm">
-          <details
-            open={showDoctorsSection}
-            onToggle={(e) => setShowDoctorsSection((e.target as HTMLDetailsElement).open)}
-            className="group"
-          >
-            <summary className="flex cursor-pointer list-none items-center justify-between rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-800">
-              <span>2) Lékaři (fixní pořadí #1–#10)</span>
-              <span className="text-xs font-medium text-slate-600 group-open:hidden">Rozbalit</span>
-              <span className="hidden text-xs font-medium text-slate-600 group-open:inline">Sbalit</span>
-            </summary>
-            <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-              {doctors.map((doctor) => (
-                <div
-                  key={doctor.id}
-                  className={`min-w-0 rounded border p-2 ${isCertifiedDoctor(doctor) ? 'border-emerald-300 bg-emerald-50/40' : 'border-slate-200'}`}
-                >
-                  <div className="mb-1 flex flex-wrap items-center gap-2">
-                    <span className="text-xs text-slate-600">#{doctor.order}</span>
-                    <span className="text-[10px] uppercase text-slate-500">{roleLabel(doctor.role)}</span>
-                    {isCertifiedDoctor(doctor) && (
-                      <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-emerald-800">
-                        Atest.
-                      </span>
-                    )}
-                  </div>
-                  <input
-                    type="text"
-                    value={doctor.name}
-                    onChange={(e) => updateDoctorName(doctor.id, e.target.value)}
-                    disabled={isFixedNamedDoctor(doctor)}
-                    className="mb-2 w-full min-w-0 rounded border border-slate-300 px-2 py-1 text-sm disabled:bg-slate-100 disabled:text-slate-600"
-                  />
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    <label className="min-w-0 rounded border border-slate-200 bg-white p-2 text-xs">
-                      <span className="mb-1 block text-slate-600">Max/měsíc</span>
-                      <div className="flex items-center justify-between gap-1">
-                        <button
-                          type="button"
-                          onClick={() => adjustMaxShifts(doctor.id, -1)}
-                          disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
-                          className="rounded border border-slate-300 px-2 py-1 leading-none disabled:bg-slate-100 disabled:text-slate-500"
-                          aria-label={`Snížit max služeb pro ${doctor.name}`}
-                        >
-                          -
-                        </button>
-                        <input
-                          type="number"
-                          min={0}
-                          value={doctor.role === 'primar' ? 1 : doctor.role === 'zastupce' ? 2 : (maxShiftsByDoctor[doctor.id] ?? 5)}
-                          onChange={(e) => updateMaxShifts(doctor.id, e.target.value)}
-                          disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
-                          className="w-14 rounded border border-slate-300 px-1 py-1 text-center text-xs disabled:bg-slate-100 disabled:text-slate-500"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => adjustMaxShifts(doctor.id, 1)}
-                          disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
-                          className="rounded border border-slate-300 px-2 py-1 leading-none disabled:bg-slate-100 disabled:text-slate-500"
-                          aria-label={`Zvýšit max služeb pro ${doctor.name}`}
-                        >
-                          +
-                        </button>
-                      </div>
-                    </label>
-                    <label className="min-w-0 rounded border border-slate-200 bg-white p-2 text-xs">
-                      <span className="mb-1 block text-slate-600">Požadováno</span>
-                      <div className="flex items-center justify-between gap-1">
-                        <button
-                          type="button"
-                          onClick={() => adjustTargetShifts(doctor.id, -1)}
-                          className="rounded border border-slate-300 px-2 py-1 leading-none"
-                          aria-label={`Snížit požadovaný počet služeb pro ${doctor.name}`}
-                        >
-                          -
-                        </button>
-                        <input
-                          type="number"
-                          min={0}
-                          value={targetShiftsByDoctor[doctor.id] ?? 0}
-                          onChange={(e) => updateTargetShifts(doctor.id, e.target.value)}
-                          className="w-14 rounded border border-slate-300 px-1 py-1 text-center text-xs"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => adjustTargetShifts(doctor.id, 1)}
-                          className="rounded border border-slate-300 px-2 py-1 leading-none"
-                          aria-label={`Zvýšit požadovaný počet služeb pro ${doctor.name}`}
-                        >
-                          +
-                        </button>
-                      </div>
-                    </label>
-                  </div>
-                </div>
-              ))}
+        {isExpertMode && (
+          <section className="rounded-lg bg-white p-4 shadow-sm">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <h2 className="text-lg font-semibold">2) Lékaři (fixní pořadí #1–#10)</h2>
+              <button
+                type="button"
+                onClick={() => setShowDoctorsSection((prev) => !prev)}
+                className="shrink-0 rounded border border-slate-300 bg-white px-3 py-1 text-sm text-slate-700"
+                aria-expanded={showDoctorsSection}
+              >
+                {showDoctorsSection ? 'Sbalit' : 'Rozbalit'}
+              </button>
             </div>
-          </details>
-        </section>
+            {showDoctorsSection && (
+              <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                {doctors.map((doctor) => (
+                  <div
+                    key={doctor.id}
+                    className={`min-w-0 rounded border p-2 ${isCertifiedDoctor(doctor) ? 'border-emerald-300 bg-emerald-50/40' : 'border-slate-200'}`}
+                  >
+                    <div className="mb-1 flex flex-wrap items-center gap-2">
+                      <span className="text-xs text-slate-600">#{doctor.order}</span>
+                      <span className="text-[10px] uppercase text-slate-500">{roleLabel(doctor.role)}</span>
+                      {isCertifiedDoctor(doctor) && (
+                        <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-emerald-800">
+                          Atest.
+                        </span>
+                      )}
+                    </div>
+                    <input
+                      type="text"
+                      value={doctor.name}
+                      onChange={(e) => updateDoctorName(doctor.id, e.target.value)}
+                      disabled={isFixedNamedDoctor(doctor)}
+                      className="mb-2 w-full min-w-0 rounded border border-slate-300 px-2 py-1 text-sm disabled:bg-slate-100 disabled:text-slate-600"
+                    />
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <label className="min-w-0 rounded border border-slate-200 bg-white p-2 text-xs">
+                        <span className="mb-1 block text-slate-600">Max/měsíc</span>
+                        <div className="flex items-center justify-between gap-1">
+                          <button
+                            type="button"
+                            onClick={() => adjustMaxShifts(doctor.id, -1)}
+                            disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
+                            className="rounded border border-slate-300 px-2 py-1 leading-none disabled:bg-slate-100 disabled:text-slate-500"
+                            aria-label={`Snížit max služeb pro ${doctor.name}`}
+                          >
+                            -
+                          </button>
+                          <input
+                            type="number"
+                            min={0}
+                            value={doctor.role === 'primar' ? 1 : doctor.role === 'zastupce' ? 2 : (maxShiftsByDoctor[doctor.id] ?? 5)}
+                            onChange={(e) => updateMaxShifts(doctor.id, e.target.value)}
+                            disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
+                            className="w-14 rounded border border-slate-300 px-1 py-1 text-center text-xs disabled:bg-slate-100 disabled:text-slate-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => adjustMaxShifts(doctor.id, 1)}
+                            disabled={doctor.role === 'primar' || doctor.role === 'zastupce'}
+                            className="rounded border border-slate-300 px-2 py-1 leading-none disabled:bg-slate-100 disabled:text-slate-500"
+                            aria-label={`Zvýšit max služeb pro ${doctor.name}`}
+                          >
+                            +
+                          </button>
+                        </div>
+                      </label>
+                      <label className="min-w-0 rounded border border-slate-200 bg-white p-2 text-xs">
+                        <span className="mb-1 block text-slate-600">Požadováno</span>
+                        <div className="flex items-center justify-between gap-1">
+                          <button
+                            type="button"
+                            onClick={() => adjustTargetShifts(doctor.id, -1)}
+                            className="rounded border border-slate-300 px-2 py-1 leading-none"
+                            aria-label={`Snížit požadovaný počet služeb pro ${doctor.name}`}
+                          >
+                            -
+                          </button>
+                          <input
+                            type="number"
+                            min={0}
+                            value={targetShiftsByDoctor[doctor.id] ?? 0}
+                            onChange={(e) => updateTargetShifts(doctor.id, e.target.value)}
+                            className="w-14 rounded border border-slate-300 px-1 py-1 text-center text-xs"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => adjustTargetShifts(doctor.id, 1)}
+                            className="rounded border border-slate-300 px-2 py-1 leading-none"
+                            aria-label={`Zvýšit požadovaný počet služeb pro ${doctor.name}`}
+                          >
+                            +
+                          </button>
+                        </div>
+                      </label>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
 
-        <section className="rounded-lg bg-white p-4 shadow-sm">
-          <h2 className="mb-3 text-lg font-semibold">3) Minulý měsíc – poslední 2 dny</h2>
-          <div className="grid gap-3 md:grid-cols-2">
+        {isExpertMode && (
+          <section className="rounded-lg bg-white p-4 shadow-sm">
+            <h2 className="mb-3 text-lg font-semibold">3) Minulý měsíc – poslední 2 dny</h2>
+            <div className="grid gap-3 md:grid-cols-2">
             <label className="flex flex-col gap-2 sm:flex-row sm:items-center">
               <span className="text-sm sm:w-48">Předposlední den měsíce</span>
               <select
@@ -1056,30 +1222,82 @@ export default function App() {
                 ))}
               </select>
             </label>
-          </div>
-          <p className="mt-2 text-xs text-slate-600">Lékař z posledního dne minulého měsíce nemůže sloužit den 1.</p>
-        </section>
+            </div>
+            <p className="mt-2 text-xs text-slate-600">
+              Lékař z posledního dne minulého měsíce nemůže sloužit den 1. Po finálním potvrzení se poslední 2 služby propíší automaticky do dalšího měsíce.
+            </p>
+            <div className="mt-4 rounded border border-slate-200 bg-slate-50 p-3">
+              <h3 className="text-sm font-semibold text-slate-800">Načíst poslední služby z uzamčených měsíců</h3>
+              {finalizedMonthHistory.length === 0 ? (
+                <p className="mt-1 text-xs text-slate-600">Zatím není k dispozici žádný uzamčený měsíc v historii verzí.</p>
+              ) : (
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  {finalizedMonthHistory.map((entry) => {
+                    const penultimateName =
+                      entry.penultimateDoctorId != null
+                        ? doctors.find((doctor) => doctor.id === entry.penultimateDoctorId)?.name ?? `Lékař #${entry.penultimateDoctorId}`
+                        : 'Nezadáno';
+                    const lastName =
+                      entry.lastDoctorId != null
+                        ? doctors.find((doctor) => doctor.id === entry.lastDoctorId)?.name ?? `Lékař #${entry.lastDoctorId}`
+                        : 'Nezadáno';
+                    return (
+                      <div key={entry.id} className="rounded border border-slate-200 bg-white p-2">
+                        <div className="text-sm font-medium text-slate-800">{entry.label}</div>
+                        <div className="mt-1 text-xs text-slate-600">
+                          Předposlední: {penultimateName}, poslední: {lastName}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setPreviousMonthLastTwo({
+                              penultimateDoctorId: entry.penultimateDoctorId,
+                              lastDoctorId: entry.lastDoctorId,
+                            })
+                          }
+                          className="mt-2 rounded border border-slate-300 bg-white px-2 py-1 text-xs"
+                        >
+                          Načíst do tohoto měsíce
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </section>
+        )}
 
-        <section className="rounded-lg bg-white p-4 shadow-sm">
-          <h2 className="mb-3 text-lg font-semibold">4) Požadavky a dostupnost</h2>
-          <div className="mb-3 flex flex-wrap gap-2">
-            {doctors.map((doctor) => (
+        {!isExpertMode && (
+          <section className="rounded-lg bg-white p-4 shadow-sm">
+            <h2 className="mb-3 text-lg font-semibold">2) Požadavky a dostupnost</h2>
+            <div className="mb-3">
               <button
-                key={doctor.id}
                 type="button"
-                onClick={() => setActiveDoctorId(doctor.id)}
-                className={`rounded-full border px-3 py-1 text-sm ${
-                  activeDoctor?.id === doctor.id
-                    ? 'border-slate-900 bg-slate-900 text-white'
-                    : isCertifiedDoctor(doctor)
-                      ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
-                      : 'border-slate-300 bg-white text-slate-800'
-                }`}
+                onClick={clearCurrentMonthRequirements}
+                className="rounded border border-rose-300 bg-rose-50 px-3 py-1 text-sm text-rose-700"
               >
-                #{doctor.order} {doctor.name}
+                Smazat všechny požadavky měsíce
               </button>
-            ))}
-          </div>
+            </div>
+            <div className="mb-3 flex flex-wrap gap-2">
+              {doctors.map((doctor) => (
+                <button
+                  key={doctor.id}
+                  type="button"
+                  onClick={() => setActiveDoctorId(doctor.id)}
+                  className={`rounded-full border px-3 py-1 text-sm ${
+                    activeDoctor?.id === doctor.id
+                      ? 'border-slate-900 bg-slate-900 text-white'
+                      : isCertifiedDoctor(doctor)
+                        ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                        : 'border-slate-300 bg-white text-slate-800'
+                  }`}
+                >
+                  #{doctor.order} {doctor.name}
+                </button>
+              ))}
+            </div>
 
           <div className="mb-3 grid gap-2 text-xs sm:grid-cols-4">
             {PREF_VALUES.map((value) => {
@@ -1096,26 +1314,23 @@ export default function App() {
             Bez omezení → Nemůže → Nechce → Chce.
             {activeDoctor && isCertifiedDoctor(activeDoctor) ? ' (Atestovaný)' : ''}
           </p>
-          <div className="mb-3">
-            <button
-              type="button"
-              onClick={clearAllPreferences}
-              className="rounded border border-rose-300 bg-rose-50 px-3 py-1 text-sm text-rose-700"
-            >
-              Smazat všechny požadavky
-            </button>
-          </div>
-
-          <div className="grid grid-cols-7 gap-1 border border-slate-200 p-1 sm:p-2">
+            <div className="grid grid-cols-7 gap-1 border border-slate-200 p-1 sm:p-2">
               {WEEKDAY_SHORT.map((d) => (
                 <div key={d} className="p-1 text-center text-[10px] font-semibold text-slate-600 sm:p-2 sm:text-xs">
                   {d}
                 </div>
               ))}
-              {cells.map((day, idx) => {
-                if (!day || !activeDoctor) {
-                  return <div key={idx} className="min-h-14 rounded bg-slate-50 sm:min-h-20" />;
+              {cells.map((cell, idx) => {
+                if (!cell.day || !activeDoctor) {
+                  return (
+                    <div key={idx} className="relative min-h-14 rounded bg-slate-50 sm:min-h-20">
+                      {cell.nextMonthDay != null && (
+                        <div className="absolute right-1 top-1 text-[10px] text-slate-400 sm:text-xs">{cell.nextMonthDay}.</div>
+                      )}
+                    </div>
+                  );
                 }
+                const day = cell.day;
                 const pref = (preferences[activeDoctor.id]?.[day] ?? 0) as PreferenceValue;
                 return (
                   <button
@@ -1130,32 +1345,36 @@ export default function App() {
                   </button>
                 );
               })}
-          </div>
-        </section>
+            </div>
+          </section>
+        )}
 
-        <section className="rounded-lg bg-white p-4 shadow-sm">
-          <h2 className="mb-3 text-lg font-semibold">5) Generování</h2>
-          <div className="flex flex-wrap gap-3">
-            <button
-              type="button"
-              onClick={runGeneration}
-              className="w-full rounded bg-slate-900 px-4 py-2 text-white sm:w-auto"
-            >
-              Generovat rozpis
-            </button>
-          </div>
-        </section>
+        {!isExpertMode && (
+          <section className="rounded-lg bg-white p-4 shadow-sm">
+            <h2 className="mb-3 text-lg font-semibold">3) Generování</h2>
+            <div className="flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={runGeneration}
+                className="w-full rounded bg-slate-900 px-4 py-2 text-white sm:w-auto"
+              >
+                Generovat rozpis
+              </button>
+            </div>
+          </section>
+        )}
+
       </div>
 
-      <section
-        className={`mt-6 rounded-lg p-4 shadow-sm print:shadow-none ${
-          activePlan.finalizedAt ? 'border border-emerald-300 bg-emerald-50' : 'bg-white'
-        }`}
-      >
+      {!isExpertMode && (
+        <section
+          className={`mt-6 rounded-lg p-4 shadow-sm print:shadow-none ${
+            activePlan.finalizedAt ? 'border border-emerald-300 bg-emerald-50' : 'bg-white'
+          }`}
+        >
         <h2 className="mb-2 text-xl font-semibold">
           Služby – {CZECH_MONTHS[month - 1]} {year}
         </h2>
-
         {!result && <p className="text-slate-600">Rozpis zatím nebyl vygenerován.</p>}
 
         {result && !result.ok && (
@@ -1233,58 +1452,72 @@ export default function App() {
           </div>
         )}
 
-        {result && result.ok && (
+            {result && result.ok && (
           <>
             <div className="no-print mb-4 flex flex-wrap gap-3">
-              <button
-                type="button"
-                onClick={runGeneration}
-                className="w-full rounded bg-slate-900 px-4 py-2 text-white sm:w-auto"
-              >
-                Vygenerovat znovu
-              </button>
-              <button
-                type="button"
-                onClick={printSchedule}
-                className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
-              >
-                Tisk A4
-              </button>
-              <button
-                type="button"
-                onClick={exportCsv}
-                className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
-              >
-                Export CSV
-              </button>
-              <button
-                type="button"
-                onClick={finalizeCurrentSchedule}
-                className="w-full rounded bg-emerald-600 px-4 py-2 text-white sm:w-auto"
-              >
-                Označit jako finální
-              </button>
-              <button
-                type="button"
-                onClick={unsetFinalizedSchedule}
-                className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
-              >
-                Zrušit finální stav
-              </button>
-              <button
-                type="button"
-                onClick={lockAllFromCurrentResult}
-                className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
-              >
-                Zamknout vše z rozpisu
-              </button>
-              <button
-                type="button"
-                onClick={unlockAllDays}
-                className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
-              >
-                Odemknout vše
-              </button>
+              {!isExpertMode && (
+                <button
+                  type="button"
+                  onClick={runGeneration}
+                  className="w-full rounded bg-slate-900 px-4 py-2 text-white sm:w-auto"
+                >
+                  Vygenerovat znovu
+                </button>
+              )}
+              {!isExpertMode && (
+                <button
+                  type="button"
+                  onClick={finalizeCurrentSchedule}
+                  className="w-full rounded bg-emerald-600 px-4 py-2 text-white sm:w-auto"
+                >
+                  Označit jako finální
+                </button>
+              )}
+              {!isExpertMode && (
+                <button
+                  type="button"
+                  onClick={unsetFinalizedSchedule}
+                  className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+                >
+                  Zrušit finální stav
+                </button>
+              )}
+              {(isExpertMode || (activePlanSlot === 1 && Boolean(activePlan.finalizedAt))) && (
+                <button
+                  type="button"
+                  onClick={printSchedule}
+                  className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+                >
+                  Tisk A4
+                </button>
+              )}
+              {(isExpertMode || (activePlanSlot === 1 && Boolean(activePlan.finalizedAt))) && (
+                <button
+                  type="button"
+                  onClick={exportCsv}
+                  className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+                >
+                  Export CSV
+                </button>
+              )}
+              {isExpertMode && (
+                <button
+                  type="button"
+                  onClick={lockAllFromCurrentResult}
+                  className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+                >
+                  Zamknout vše z rozpisu
+                </button>
+              )}
+              {isExpertMode && (
+                <button
+                  type="button"
+                  onClick={unlockAllDays}
+                  className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+                >
+                  Odemknout vše
+                </button>
+              )}
               {activePlan.finalizedAt && (
                 <span className="text-sm font-medium text-emerald-700">
                   Finální potvrzení: {new Date(activePlan.finalizedAt).toLocaleString('cs-CZ')}
@@ -1322,12 +1555,15 @@ export default function App() {
               {mobileResultDays.map((day) => {
                 const assignedDoctor = doctors.find((d) => d.id === result.assignments[day]);
                 const isCertified = assignedDoctor ? isCertifiedDoctor(assignedDoctor) : false;
+                const isLocked = locks[day] != null;
+                const isSoftLock = isSoftWantLockedDay(day);
+                const controlsDisabled = isLocked && !isSoftLock;
                 return (
                   <div
                     key={day}
                     className={`rounded border p-3 ${
-                      locks[day] != null
-                        ? 'border-blue-400 bg-blue-50'
+                      isLocked
+                        ? 'border-emerald-400 bg-emerald-50'
                         : problematicDaySet.has(day)
                         ? 'border-rose-300 bg-rose-50'
                         : weekdayShortForDay(day) === 'So' || weekdayShortForDay(day) === 'Ne'
@@ -1339,7 +1575,11 @@ export default function App() {
                       <div className="text-sm font-semibold text-slate-700">
                         {weekdayShortForDay(day)} {day}.
                       </div>
-                      {locks[day] != null && <div className="text-xs font-medium text-blue-700">Zamčeno</div>}
+                      {isLocked && (
+                        <div className="text-xs font-medium text-emerald-700">
+                          {isSoftLock ? 'Auto-zamčeno (Chce)' : 'Zamčeno'}
+                        </div>
+                      )}
                     </div>
                     <div className="mt-1 flex items-center gap-2">
                       <span className="text-base font-medium">{assignedDoctor?.name ?? '—'}</span>
@@ -1350,7 +1590,7 @@ export default function App() {
                       )}
                     </div>
                     <div className="no-print mt-2">
-                      <div className="flex flex-col gap-1">
+                      <div className={`flex flex-col gap-1 ${isLocked ? 'opacity-60' : ''}`}>
                         <select
                           value={resultSelectionByDay[day] ?? result.assignments[day]}
                           onChange={(e) =>
@@ -1359,7 +1599,8 @@ export default function App() {
                               [day]: Number(e.target.value),
                             }))
                           }
-                          className="rounded border border-slate-300 px-2 py-1 text-xs"
+                          disabled={controlsDisabled}
+                          className="rounded border border-slate-300 px-2 py-1 text-xs disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
                         >
                           {doctors.map((doctor) => (
                             <option key={doctor.id} value={doctor.id}>
@@ -1370,11 +1611,21 @@ export default function App() {
                         <button
                           type="button"
                           onClick={() => applyResultDayChangeAndRecalculate(day)}
-                          className="rounded border border-slate-300 px-2 py-1 text-xs"
+                          disabled={controlsDisabled}
+                          className="rounded border border-slate-300 px-2 py-1 text-xs disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
                         >
-                          Zamknout a dopočítat
+                          {isSoftLock ? 'Upravit a dopočítat' : 'Zamknout a dopočítat'}
                         </button>
                       </div>
+                      {isLocked && (
+                        <button
+                          type="button"
+                          onClick={() => unlockDay(day)}
+                          className="mt-1 rounded border border-emerald-400 bg-white px-2 py-1 text-xs text-emerald-700"
+                        >
+                          Odemknout den
+                        </button>
+                      )}
                     </div>
                   </div>
                 );
@@ -1387,56 +1638,78 @@ export default function App() {
                     {d}
                   </div>
                 ))}
-                {cells.map((day, idx) => (
+                {cells.map((cell, idx) => (
                   <div
                     key={idx}
                     className={`min-h-20 border p-1 sm:min-h-24 sm:p-2 ${
-                      day && locks[day] != null
-                        ? 'border-blue-400 bg-blue-50'
-                        : day && problematicDaySet.has(day)
+                      cell.day && locks[cell.day] != null
+                        ? 'border-emerald-400 bg-emerald-50'
+                        : cell.day && problematicDaySet.has(cell.day)
                           ? 'border-rose-300 bg-rose-50'
                           : 'border-slate-100'
                     }`}
                   >
-                    {day && (
-                      <>
-                        <div className="text-[10px] font-semibold text-slate-600 sm:text-xs">{day}</div>
-                        <div className="mt-1 truncate text-[10px] leading-tight sm:text-sm">
-                          {doctors.find((d) => d.id === result.assignments[day])?.name ?? '—'}
-                        </div>
-                        <div className="no-print mt-2">
-                          <div className="flex flex-col gap-1">
-                            <select
-                              value={resultSelectionByDay[day] ?? result.assignments[day]}
-                              onChange={(e) =>
-                                setResultSelectionByDay((prev) => ({
-                                  ...prev,
-                                  [day]: Number(e.target.value),
-                                }))
-                              }
-                              className="rounded border border-slate-300 px-1 py-1 text-[10px] sm:text-xs"
-                            >
-                              {doctors.map((doctor) => (
-                                <option key={doctor.id} value={doctor.id}>
-                                  {doctor.name}
-                                </option>
-                              ))}
-                            </select>
-                            <button
-                              type="button"
-                              onClick={() => applyResultDayChangeAndRecalculate(day)}
-                              className="rounded border border-slate-300 px-1 py-1 text-[10px] sm:text-xs"
-                            >
-                              Zamknout a dopočítat
-                            </button>
-                          </div>
-                        </div>
-                        {locks[day] != null && (
-                          <div className="mt-1 text-xs font-medium text-blue-700">
-                            Zamčeno: {doctors.find((d) => d.id === locks[day])?.name}
-                          </div>
-                        )}
-                      </>
+                    {cell.day &&
+                      (() => {
+                        const day = cell.day;
+                        const isLocked = locks[day] != null;
+                        const isSoftLock = isSoftWantLockedDay(day);
+                        const controlsDisabled = isLocked && !isSoftLock;
+                        return (
+                          <>
+                            <div className="text-[10px] font-semibold text-slate-600 sm:text-xs">{day}</div>
+                            <div className="mt-1 truncate text-[10px] leading-tight sm:text-sm">
+                              {doctors.find((d) => d.id === result.assignments[day])?.name ?? '—'}
+                            </div>
+                            <div className="no-print mt-2">
+                              <div className={`flex flex-col gap-1 ${isLocked ? 'opacity-60' : ''}`}>
+                                <select
+                                  value={resultSelectionByDay[day] ?? result.assignments[day]}
+                                  onChange={(e) =>
+                                    setResultSelectionByDay((prev) => ({
+                                      ...prev,
+                                      [day]: Number(e.target.value),
+                                    }))
+                                  }
+                                  disabled={controlsDisabled}
+                                  className="rounded border border-slate-300 px-1 py-1 text-[10px] sm:text-xs disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
+                                >
+                                  {doctors.map((doctor) => (
+                                    <option key={doctor.id} value={doctor.id}>
+                                      {doctor.name}
+                                    </option>
+                                  ))}
+                                </select>
+                                <button
+                                  type="button"
+                                  onClick={() => applyResultDayChangeAndRecalculate(day)}
+                                  disabled={controlsDisabled}
+                                  className="rounded border border-slate-300 px-1 py-1 text-[10px] sm:text-xs disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
+                                >
+                                  {isSoftLock ? 'Upravit a dopočítat' : 'Zamknout a dopočítat'}
+                                </button>
+                              </div>
+                              {isLocked && (
+                                <button
+                                  type="button"
+                                  onClick={() => unlockDay(day)}
+                                  className="mt-1 rounded border border-emerald-400 bg-white px-1 py-1 text-[10px] text-emerald-700 sm:text-xs"
+                                >
+                                  Odemknout den
+                                </button>
+                              )}
+                            </div>
+                            {isLocked && (
+                              <div className="mt-1 text-xs font-medium text-emerald-700">
+                                {isSoftLock ? 'Auto-zamčeno (Chce): ' : 'Zamčeno: '}
+                                {doctors.find((d) => d.id === locks[day])?.name}
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
+                    {!cell.day && cell.nextMonthDay != null && (
+                      <div className="text-right text-[10px] text-slate-400 sm:text-xs">{cell.nextMonthDay}.</div>
                     )}
                   </div>
                 ))}
@@ -1444,36 +1717,44 @@ export default function App() {
 
             <div className="mt-4">
               <h3 className="mb-2 text-lg font-semibold">Statistiky</h3>
-              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                {doctors.map((doctor) => {
-                  const actual = result.stats.totalByDoctor[doctor.id] ?? 0;
-                  const target = targetShiftsByDoctor[doctor.id] ?? 0;
-                  const weekend = result.stats.weekendByDoctor[doctor.id] ?? 0;
-                  const diff = actual - target;
-                  const diffText = diff === 0 ? '0' : diff > 0 ? `+${diff}` : String(diff);
-                  const diffClass =
-                    diff === 0 ? 'text-emerald-700 bg-emerald-50' : diff > 0 ? 'text-amber-700 bg-amber-50' : 'text-rose-700 bg-rose-50';
-                  return (
-                    <div key={doctor.id} className="rounded border border-slate-200 bg-slate-50 p-3 text-sm">
-                      <div className="font-semibold text-slate-800">{doctor.name}</div>
-                      <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                        <span className="rounded bg-slate-100 px-2 py-1 text-slate-700">Požadováno: {target}</span>
-                        <span className="rounded bg-slate-100 px-2 py-1 text-slate-700">Reálně: {actual}</span>
-                        <span className={`rounded px-2 py-1 ${diffClass}`}>Rozdíl: {diffText}</span>
-                        <span className="rounded bg-slate-100 px-2 py-1 text-slate-700">Víkendy: {weekend}</span>
-                      </div>
-                      <div className="mt-2 text-xs text-slate-700">
-                        Datumy služeb:{' '}
-                        {serviceDatesByDoctor[doctor.id] && serviceDatesByDoctor[doctor.id].length > 0
-                          ? serviceDatesByDoctor[doctor.id].join(', ')
-                          : '—'}
-                      </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {[
+                  { title: 'Atestovaní', doctors: doctors.filter((doctor) => isCertifiedDoctor(doctor)) },
+                  { title: 'Neatestovaní', doctors: doctors.filter((doctor) => !isCertifiedDoctor(doctor)) },
+                ].map((group) => (
+                  <div key={group.title} className="rounded border border-slate-200 bg-slate-50 p-2 text-xs">
+                    <p className="mb-1 font-semibold text-slate-700">{group.title}</p>
+                    <div className="space-y-1">
+                      {group.doctors.map((doctor) => {
+                        const actual = result.stats.totalByDoctor[doctor.id] ?? 0;
+                        const target = targetShiftsByDoctor[doctor.id] ?? 0;
+                        const weekend = result.stats.weekendByDoctor[doctor.id] ?? 0;
+                        const diff = actual - target;
+                        const diffText = diff === 0 ? '0' : diff > 0 ? `+${diff}` : String(diff);
+                        const diffClass =
+                          diff === 0 ? 'text-emerald-700 bg-emerald-50' : diff > 0 ? 'text-amber-700 bg-amber-50' : 'text-rose-700 bg-rose-50';
+                        return (
+                          <div key={doctor.id} className="flex flex-wrap items-center gap-2 rounded bg-white px-2 py-1">
+                            <span className="min-w-24 font-semibold text-slate-800">{doctor.name}</span>
+                            <span className="rounded bg-slate-100 px-2 py-0.5 text-slate-700">P: {target}</span>
+                            <span className="rounded bg-slate-100 px-2 py-0.5 text-slate-700">R: {actual}</span>
+                            <span className={`rounded px-2 py-0.5 ${diffClass}`}>Δ {diffText}</span>
+                            <span className="rounded bg-slate-100 px-2 py-0.5 text-slate-700">V: {weekend}</span>
+                            {isExpertMode && (
+                              <div className="text-xs text-slate-700">
+                                Datumy služeb:{' '}
+                                {serviceDatesByDoctor[doctor.id] && serviceDatesByDoctor[doctor.id].length > 0
+                                  ? serviceDatesByDoctor[doctor.id].join(', ')
+                                  : '—'}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
-                  );
-                })}
+                  </div>
+                ))}
               </div>
-              <p className="mt-3 text-sm font-medium">Pá+Ne párování: {result.stats.friSunPairings}</p>
-
               <p className="mt-4 text-xs text-slate-500">
                 Vygenerováno: {new Date().toLocaleString('cs-CZ')}
                 {result.seedUsed ? ` | seed: ${result.seedUsed}` : ''}
@@ -1481,80 +1762,85 @@ export default function App() {
             </div>
           </>
         )}
-      </section>
+        </section>
+      )}
 
-      <section className="no-print mt-6 rounded-lg bg-white p-4 shadow-sm">
-        <h2 className="mb-3 text-lg font-semibold">Zálohy a Obnova</h2>
-        <div className="flex flex-wrap gap-3">
-          <button
-            type="button"
-            onClick={saveBackupToDevice}
-            className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
-          >
-            Uložit zálohu (zařízení)
-          </button>
-          <button
-            type="button"
-            onClick={restoreBackupFromDevice}
-            className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
-          >
-            Obnovit poslední zálohu
-          </button>
-          <button
-            type="button"
-            onClick={exportBackupFile}
-            className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
-          >
-            Stáhnout zálohu (JSON)
-          </button>
-          <button
-            type="button"
-            onClick={() => backupFileInputRef.current?.click()}
-            className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
-          >
-            Načíst zálohu (JSON)
-          </button>
-          <input
-            ref={backupFileInputRef}
-            type="file"
-            accept="application/json,.json"
-            className="hidden"
-            onChange={async (e) => {
-              await importBackupFile(e.target.files?.[0] ?? null);
-              e.currentTarget.value = '';
-            }}
-          />
-        </div>
-        {backupNotice && <p className="mt-3 text-sm text-slate-600">{backupNotice}</p>}
-      </section>
-
-      <section className="no-print mt-6 rounded-lg bg-white p-4 shadow-sm">
-        <h2 className="mb-3 text-lg font-semibold">Uložené Verze</h2>
-        {savedVersions.length === 0 ? (
-          <p className="text-sm text-slate-600">Zatím nejsou uložené žádné verze.</p>
-        ) : (
-          <div className="space-y-2">
-            {savedVersions.map((version) => (
-              <div
-                key={version.id}
-                className="flex flex-col gap-2 rounded border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"
-              >
-                <div className="text-sm text-slate-700">
-                  <div className="font-medium text-slate-800">{version.title}</div>
-                  <div>Uloženo: {new Date(version.createdAt).toLocaleString('cs-CZ')}</div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => loadSavedVersion(version)}
-                  className="rounded border border-slate-300 bg-white px-3 py-1 text-sm"
-                >
-                  Načíst verzi
-                </button>
-              </div>
-            ))}
+      {isExpertMode && (
+        <section className="no-print mt-6 rounded-lg bg-white p-4 shadow-sm">
+          <h2 className="mb-3 text-lg font-semibold">Zálohy a Obnova</h2>
+          <div className="flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={saveBackupToDevice}
+              className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+            >
+              Uložit zálohu (zařízení)
+            </button>
+            <button
+              type="button"
+              onClick={restoreBackupFromDevice}
+              className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+            >
+              Obnovit poslední zálohu
+            </button>
+            <button
+              type="button"
+              onClick={exportBackupFile}
+              className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+            >
+              Stáhnout zálohu (JSON)
+            </button>
+            <button
+              type="button"
+              onClick={() => backupFileInputRef.current?.click()}
+              className="w-full rounded bg-slate-200 px-4 py-2 sm:w-auto"
+            >
+              Načíst zálohu (JSON)
+            </button>
+            <input
+              ref={backupFileInputRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={async (e) => {
+                await importBackupFile(e.target.files?.[0] ?? null);
+                e.currentTarget.value = '';
+              }}
+            />
           </div>
-        )}
-      </section>
+          {backupNotice && <p className="mt-3 text-sm text-slate-600">{backupNotice}</p>}
+        </section>
+      )}
+
+      {isExpertMode && (
+        <section className="no-print mt-6 rounded-lg bg-white p-4 shadow-sm">
+          <h2 className="mb-3 text-lg font-semibold">Uložené Verze</h2>
+          {savedVersions.length === 0 ? (
+            <p className="text-sm text-slate-600">Zatím nejsou uložené žádné verze.</p>
+          ) : (
+            <div className="space-y-2">
+              {savedVersions.map((version) => (
+                <div
+                  key={version.id}
+                  className="flex flex-col gap-2 rounded border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div className="text-sm text-slate-700">
+                    <div className="font-medium text-slate-800">{version.title}</div>
+                    <div>Uloženo: {new Date(version.createdAt).toLocaleString('cs-CZ')}</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => loadSavedVersion(version)}
+                    className="rounded border border-slate-300 bg-white px-3 py-1 text-sm"
+                  >
+                    Načíst verzi
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
     </div>
   );
 }
