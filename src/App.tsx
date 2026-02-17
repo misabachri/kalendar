@@ -334,6 +334,19 @@ export default function App() {
   };
 
   const runGeneration = () => {
+    const hasGeneratedPlan = Boolean(result?.ok);
+    const hasLockedDays = Object.values(locks).some((doctorId) => doctorId !== null && doctorId !== undefined);
+    if (hasGeneratedPlan || hasLockedDays) {
+      const confirmed = window.confirm(
+        activePlan.finalizedAt
+          ? 'Rozpis je označený jako finální. Opravdu ho chceš přegenerovat a přepsat?'
+          : 'Už existuje vygenerovaný/částečně zamčený rozpis. Opravdu ho chceš přepsat?',
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
+
     const previousResult = result;
     const next = runGenerationWithLocks(locks);
     if (next.ok && previousResult?.ok) {
